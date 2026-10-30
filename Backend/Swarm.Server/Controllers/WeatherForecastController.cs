@@ -1,3 +1,5 @@
+// INFO: Keeping this file here as an example. It has no proper functionality in Swarm.
+
 using Microsoft.AspNetCore.Mvc;
 
 namespace Swarm.Server.Controllers;
