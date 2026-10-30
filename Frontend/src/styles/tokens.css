@@ -1,0 +1,209 @@
+/* ------------------------------------------------------------------
+   Layer 1 — palette. The hexes live here and nowhere else.
+   Kanagawa lineage, moved where a screen of small text needed it moved.
+   ------------------------------------------------------------------ */
+:root {
+  --palette-dragon-950: #12110f;
+  --palette-dragon-900: #181616;
+  --palette-dragon-850: #1d1c19;
+  --palette-dragon-800: #22211e;
+  --palette-dragon-750: #262522;
+  --palette-dragon-700: #2a2926;
+  --palette-dragon-650: #343330;
+  --palette-dragon-600: #4a4843;
+  --palette-dragon-500: #6b6761;
+  --palette-dragon-450: #938f87;
+  --palette-dragon-350: #a6a69c;
+  --palette-dragon-200: #c5c9c5;
+  --palette-dragon-150: #dedbd2;
+  --palette-dragon-100: #e6e2d8;
+  --palette-dragon-selected: #20282c;
+
+  --palette-lotus-50: #fbf7ee;
+  --palette-lotus-100: #f4efe4;
+  --palette-lotus-150: #efeadd;
+  --palette-lotus-200: #e8e0cf;
+  --palette-lotus-250: #e6edf0;
+  --palette-lotus-300: #d6cbb5;
+  --palette-lotus-350: #bfb29a;
+  --palette-lotus-500: #8c8577;
+  --palette-lotus-550: #666257;
+  --palette-lotus-650: #5f5b52;
+  --palette-lotus-800: #4f4f58;
+  --palette-lotus-900: #2f2e33;
+
+  --palette-steel-300: #a8c6d6;
+  --palette-steel-400: #7fa8be;
+  --palette-steel-450: #95bccf;
+  --palette-steel-500: #6a93a9;
+  --palette-steel-600: #3e6478;
+  --palette-steel-700: #325366;
+  --palette-steel-800: #284454;
+  --palette-steel-950: #10181d;
+  --palette-steel-wave: #2d4f67;
+
+  --palette-ochre-dark: #c4b28a;
+  --palette-ochre-light: #7e5e22;
+  --palette-sage-dark: #8a9a7b;
+  --palette-sage-light: #4f6b45;
+  --palette-amber-dark: #d7a657;
+  --palette-amber-light: #8a5a12;
+  --palette-red-dark: #c4746e;
+  --palette-red-light: #a34a44;
+  --palette-mauve-dark: #a292a3;
+  --palette-mauve-light: #6d5a6e;
+  --palette-aqua-dark: #8ea4a2;
+  --palette-aqua-light: #476b68;
+  --palette-clay-dark: #b98d7b;
+  --palette-clay-light: #8c5a43;
+  --palette-violet-light: #d9cbe0;
+}
+
+/* ------------------------------------------------------------------
+   Layers 2 + 3 — theme roles, light resolved by default.
+   `:root, .theme-light` are twins on purpose: a subtree can render light
+   while the app is dark, which is how the capture pair is taken.
+   Components read only these names.
+   ------------------------------------------------------------------ */
+:root,
+.theme-light {
+  --bg-canvas: var(--palette-lotus-100);
+  --bg-surface: var(--palette-lotus-50);
+  --bg-raised: var(--palette-lotus-50);
+  --bg-sunken: var(--palette-lotus-150);
+  --bg-hover: var(--palette-lotus-200);
+  --bg-selected: var(--palette-lotus-250);
+
+  --text-primary: var(--palette-lotus-800);
+  --text-secondary: var(--palette-lotus-650);
+  --text-muted: var(--palette-lotus-550);
+  --text-faint: var(--palette-lotus-500);
+  --text-inverse: var(--palette-lotus-50);
+
+  --border-subtle: var(--palette-lotus-350);
+  --border-strong: var(--palette-lotus-500);
+  --border-focus: var(--palette-steel-600);
+
+  --action-primary-bg: var(--palette-steel-600);
+  --action-primary-bg-hover: var(--palette-steel-700);
+  --action-primary-bg-active: var(--palette-steel-800);
+  --action-primary-fg: var(--palette-lotus-50);
+  --action-quiet-fg: var(--palette-steel-600);
+  --focus-ring: var(--palette-steel-600);
+
+  --selection-bg: var(--palette-violet-light);
+  --selection-fg: var(--palette-lotus-900);
+
+  --status-success: var(--palette-sage-light);
+  --status-warning: var(--palette-amber-light);
+  --status-danger: var(--palette-red-light);
+  --status-info: var(--palette-steel-600);
+
+  --state-queued: var(--palette-ochre-light);
+  --state-in-progress: var(--palette-steel-600);
+  --state-verification: var(--palette-amber-light);
+  --state-closed: var(--palette-sage-light);
+
+  --kind-model: var(--palette-ochre-light);
+  --kind-tokenize: var(--palette-ochre-light);
+  --kind-chat: var(--palette-mauve-light);
+  --kind-rl: var(--palette-aqua-light);
+  --kind-benchmark: var(--palette-sage-light);
+  --destructive: var(--palette-red-light);
+
+  --texture-ink: var(--palette-lotus-800);
+  --texture-warm: var(--palette-clay-light);
+  --texture-opacity: 0.065;
+  --texture-warm-opacity: 0.16;
+  --texture-glyph-size: 14px;
+
+  --throbber-base: var(--palette-lotus-300);
+  --throbber-spark: var(--palette-steel-600);
+}
+
+.dark {
+  --bg-canvas: var(--palette-dragon-900);
+  --bg-surface: var(--palette-dragon-850);
+  --bg-raised: var(--palette-dragon-800);
+  --bg-sunken: var(--palette-dragon-950);
+  --bg-hover: var(--palette-dragon-750);
+  --bg-selected: var(--palette-dragon-selected);
+
+  --text-primary: var(--palette-dragon-200);
+  --text-secondary: var(--palette-dragon-350);
+  --text-muted: var(--palette-dragon-450);
+  --text-faint: var(--palette-dragon-500);
+  --text-inverse: var(--palette-dragon-950);
+
+  --border-subtle: var(--palette-dragon-600);
+  --border-strong: var(--palette-dragon-500);
+  --border-focus: var(--palette-steel-400);
+
+  --action-primary-bg: var(--palette-steel-400);
+  --action-primary-bg-hover: var(--palette-steel-450);
+  --action-primary-bg-active: var(--palette-steel-500);
+  --action-primary-fg: var(--palette-steel-950);
+  --action-quiet-fg: var(--palette-steel-400);
+  --focus-ring: var(--palette-steel-400);
+
+  --selection-bg: var(--palette-steel-wave);
+  --selection-fg: var(--palette-dragon-100);
+
+  --status-success: var(--palette-sage-dark);
+  --status-warning: var(--palette-amber-dark);
+  --status-danger: var(--palette-red-dark);
+  --status-info: var(--palette-steel-400);
+
+  --state-queued: var(--palette-ochre-dark);
+  --state-in-progress: var(--palette-steel-400);
+  --state-verification: var(--palette-amber-dark);
+  --state-closed: var(--palette-sage-dark);
+
+  --kind-model: var(--palette-ochre-dark);
+  --kind-tokenize: var(--palette-ochre-dark);
+  --kind-chat: var(--palette-mauve-dark);
+  --kind-rl: var(--palette-aqua-dark);
+  --kind-benchmark: var(--palette-sage-dark);
+  --destructive: var(--palette-red-dark);
+
+  --texture-ink: var(--palette-dragon-200);
+  --texture-warm: var(--palette-clay-dark);
+
+  --throbber-base: var(--palette-dragon-600);
+  --throbber-spark: var(--palette-steel-400);
+}
+
+/* ------------------------------------------------------------------
+   Sizing roles — a size is a size in both themes, so no second layer.
+   ------------------------------------------------------------------ */
+:root {
+  --space-sheet: 1.5rem;
+  --space-section: 2rem;
+  --radius-sheet-role: 6px;
+  --radius-control-role: 4px;
+  --radius-control-sm-role: 3px;
+  --radius-marker: 2px;
+  --radius-composer: 14px;
+  --radius-bubble: 12px;
+
+  --shadow-offset-x: 1px;
+  --shadow-offset-y: 2px;
+
+  --duration-fast: 120ms;
+  --duration-base: 200ms;
+  --duration-slow: 360ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0.2, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --duration-fast: 0.01ms;
+    --duration-base: 0.01ms;
+    --duration-slow: 0.01ms;
+  }
+}
+
+::selection {
+  background: var(--selection-bg);
+  color: var(--selection-fg);
+}
