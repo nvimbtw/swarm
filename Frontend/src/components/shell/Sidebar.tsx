@@ -27,7 +27,7 @@ export function Sidebar({ connected, theme, onToggleTheme }: SidebarProps) {
         <div className="flex items-center justify-between gap-3">
           <p className="flex items-baseline gap-1.5">
             <span className="figure text-sm text-ink">{connected}</span>
-            <span className="text-xs text-ink-muted">connected</span>
+            <span className="text-xs text-ink-muted">preview sessions</span>
           </p>
           <ThemeToggle theme={theme} onToggle={onToggleTheme} />
         </div>

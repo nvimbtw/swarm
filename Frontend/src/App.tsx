@@ -2,6 +2,7 @@ import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
 import { AppShell } from './components/shell/AppShell'
 import { sessions } from './data/fixtures'
 import { AdminPage } from './pages/AdminPage'
+import { OverviewPage } from './pages/OverviewPage'
 import { AccessibilityPage, ImprintPage, PrivacyPage } from './pages/LegalPages'
 import { NotFoundPage, PreviewNotice } from './pages/PreviewNotice'
 
@@ -12,9 +13,9 @@ export function App() {
     <BrowserRouter basename={import.meta.env.BASE_URL}>
       <AppShell connected={connected}>
         <Routes>
-          <Route path="/" element={<Navigate to="/admin" replace />} />
+          <Route path="/" element={<Navigate to="/overview" replace />} />
           <Route path="/admin" element={<AdminPage />} />
-          <Route path="/overview" element={<PreviewNotice title="Overview" />} />
+          <Route path="/overview" element={<OverviewPage />} />
           <Route path="/work" element={<PreviewNotice title="Work" />} />
           <Route path="/sessions" element={<PreviewNotice title="Sessions" />} />
           <Route path="/privacy" element={<PrivacyPage />} />

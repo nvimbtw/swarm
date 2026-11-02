@@ -76,6 +76,10 @@ export function AdminPage() {
         }
       />
 
+      <p className="mb-6 text-xs text-ink-muted">
+        This workspace uses demo data. Live server connections are shown in Overview.
+      </p>
+
       <div className="grid gap-10 xl:grid-cols-[360px_minmax(0,1fr)] xl:gap-12">
         <div className="grid min-w-0 content-start gap-10 md:grid-cols-[minmax(0,1fr)_280px] xl:grid-cols-1 xl:gap-10">
           <QueuePanel

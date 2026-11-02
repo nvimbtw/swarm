@@ -4,3 +4,9 @@ GET {{Swarm.Server_HostAddress}}/weatherforecast/
 Accept: application/json
 
 ###
+
+# Uptime, connection/message counts, and recent server-side send timings.
+GET {{Swarm.Server_HostAddress}}/diagnostics
+Accept: application/json
+
+###

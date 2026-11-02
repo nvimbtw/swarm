@@ -6,9 +6,34 @@ Swarm connects project conversations, issue and feature tracking, and agent sess
 
 ## Project status
 
-This repository is the beginning of a modular rebuild of an earlier Python Discord bot and MCP server. The new backend currently contains the generated ASP.NET Core Web API scaffold and its weather example.
+This repository is the beginning of a modular rebuild of an earlier Python Discord bot and MCP server. The backend contains an ASP.NET Core Web API, Discord gateway and `/ping` command wiring, a basic WebSocket endpoint, connection diagnostics, and the generated weather example.
 
-The architecture and workflows below describe the intended system. Session connections, Discord integration, persistence, and the dashboard are not implemented yet. Harness integration capabilities, including prompt injection into an existing session, still need to be verified for each supported environment.
+The React/TypeScript dashboard has a live Overview page for connection diagnostics and an Admin design preview with fixture data. Authenticated harness sessions, the full Discord workflows, persistence, and the remaining dashboard integrations are not implemented yet. The architecture and workflows below describe the intended system. Harness integration capabilities, including prompt injection into an existing session, still need to be verified for each supported environment.
+
+## Connection diagnostics
+
+Startup requires `DISCORD_TOKEN` for the Discord integration. It can be supplied as an environment variable or in the nearest `.env` file in the working directory or a parent directory, including `Backend/.env` when running from `Backend/Swarm.Server`.
+
+`GET /diagnostics` returns a live JSON snapshot containing:
+
+- Uptime in seconds and formatted as hours, minutes, and seconds.
+- Active and total accepted WebSocket connections, and lifetime sent/received message counts.
+- Active connections and the most recent 20 disconnections, with timestamps, duration, and individual message counts.
+- Average and maximum send duration, and the number strictly above 20 ms, across the most recent 100 successful sends. Before the first send, average and maximum are `null` and the count is zero.
+
+`/ws` continues sending `Hello from Swarm!` approximately once per second. It also receives and counts complete text or binary messages; payloads are discarded. WebSocket control frames are excluded from the message counts. Send duration measures the server's `SendAsync` operation, not client round-trip latency or delivery confirmation.
+
+Diagnostics are held in memory and reset when the server restarts. Durations use monotonic stopwatches; timestamps use UTC. The HTTP endpoint follows the server's current access model and has no authentication configured. An example request is included in `Backend/Swarm.Server/Swarm.Server.http`.
+
+The dashboard's `/overview` page displays these diagnostics and refreshes automatically. It reads the HTTP snapshot without opening another WebSocket, allowing a terminal client to demonstrate the connection independently. Start the frontend with `npm run dev` from `Frontend/`, open `http://localhost:5173/overview`, then connect in another terminal:
+
+```bash
+websocat ws://localhost:5142/ws
+```
+
+Watch the active connection and sent count appear, type a line to increase the received count, and exit the client to see its final counters in recent disconnections. The backend must be running separately. Vite proxies frontend `/api` requests to the backend at `http://127.0.0.1:5142` by default; see [Frontend/README.md](Frontend/README.md) for setup and deployment details.
+
+The coursework explanation and individual contributions are in [Paperwork/003-diagnostika.md](Paperwork/003-diagnostika.md) and [Paperwork/Dokumentacija.md](Paperwork/Dokumentacija.md). No builds, automated tests, or application runs were performed by the coding assistant during these changes.
 
 ## How it will work
 
@@ -89,13 +114,13 @@ Each harness needs an adapter for identifying its session, delivering messages, 
 | Discord integration | Module in the central server | Translate Discord interactions into server actions and publish shared updates into threads. |
 | Local connector | Python, planned | Maintain the session's WebSocket connection, expose MCP tools, and use harness-specific adapters to deliver requests. |
 | Dashboard API | Part of the central server | Provide snapshots and live updates about projects, sessions, queues, and work. |
-| Dashboard | React / TypeScript, proposed | Display connected agents, activity, task progress, and agent animations. Frontend tooling is still to be finalised. |
+| Dashboard | React / TypeScript, Vite, Tailwind CSS | Live connection diagnostics and an Admin design preview; agent activity and task integrations are planned. |
 | Database | SQLite, planned | Store operational state, tracked items, briefs, document records, relationships, and history. |
 | Connection skill | `SKILL.md` and supporting instructions | Launch the local connector and connect the current harness session. |
 
 The backend is one modular application. Discord, dashboard, and connection modules use shared services so that task operations follow the same rules across entry points.
 
-Local connectors initiate their connections to the server. Each connected harness session has a WebSocket connection, and each dashboard instance receives live updates through its own connection.
+Local connectors will initiate their connections to the server. Each connected harness session is planned to have a WebSocket connection. The current dashboard refreshes diagnostics over HTTP; a dedicated dashboard event stream is planned.
 
 The dashboard is a visual monitoring interface. Its physical presentation—browser, touchscreen, or a display with dedicated controls—will be decided later.
 
@@ -105,19 +130,22 @@ The dashboard is a visual monitoring interface. Its physical presentation—brow
 Swarm/
 ├── Backend/
 │   └── Swarm.Server/    # ASP.NET Core server
+├── Frontend/            # React dashboard: live Overview and Admin preview
 ├── Client/             # Local connector, MCP tools, and harness adapters
 ├── Skills/             # Session connection skill
 ├── Paperwork/          # Coursework and project documentation
 └── README.md
 ```
 
-`Client/` and `Skills/` are placeholders. A `Frontend/` directory is planned for the dashboard.
+`Client/` and `Skills/` are placeholders.
 
 ## Responsibilities
 
 | Team member | Primary responsibility |
 | --- | --- |
 | Tadej Gungl | Core backend, SQLite and the data model, client–server WebSocket communication, local connector, harness adapters, MCP, and the connection skill. |
-| Jan Vidovič | Dashboard frontend and the backend API that supplies its data. |
-| Aleks Detiček | Backend integration with the Discord API, including commands, threads, and published updates. |
+| Jan Vidovic | Dashboard frontend and Admin design preview. |
+| Aleks Deticek | Discord bot integration; further commands, threads, and published updates are planned. |
+
+Tadej's current contribution includes the WebSocket endpoint, connection diagnostics, reusable calculations, HTTP API, and live Overview integration. Named contribution sections and their relationship to the coursework are maintained in [Paperwork/Dokumentacija.md](Paperwork/Dokumentacija.md).
 

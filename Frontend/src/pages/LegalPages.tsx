@@ -38,8 +38,10 @@ export function PrivacyPage() {
       description="What the Swarm Admin preview does and does not collect."
     >
       <p>
-        This preview is a static page. It does not collect analytics, set cookies, or ask you to
-        sign up. It loads no third-party scripts.
+        Overview requests connection diagnostics from the configured Swarm server, including
+        connection identifiers, timestamps, durations, and message counts. Message contents are
+        not displayed. Admin uses demo data. The dashboard does not collect analytics, set cookies,
+        or ask you to sign up. It loads no third-party scripts.
       </p>
       <h2>Hosting</h2>
       <p>

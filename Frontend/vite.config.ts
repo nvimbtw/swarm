@@ -12,6 +12,15 @@ function normalizeBase(path: string | undefined) {
 
 const base = normalizeBase(process.env.BASE_PATH)
 
+// Keep browser requests on the frontend origin; no backend CORS changes are needed.
+const apiProxy = {
+  '/api': {
+    target: process.env.SWARM_API_TARGET || 'http://127.0.0.1:5142',
+    changeOrigin: true,
+    rewrite: (path: string) => path.replace(/^\/api/, ''),
+  },
+}
+
 // GitHub Pages serves files from disk, so an unknown path returns 404.html.
 // Emit one that keeps the requested path and bounces back into the SPA.
 function githubPagesSpaFallback() {
@@ -48,6 +57,8 @@ function githubPagesSpaFallback() {
 export default defineConfig({
   base,
   plugins: [react(), tailwindcss(), githubPagesSpaFallback()],
+  server: { proxy: apiProxy },
+  preview: { proxy: apiProxy },
   test: {
     environment: 'jsdom',
     globals: true,

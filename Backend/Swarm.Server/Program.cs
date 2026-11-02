@@ -4,8 +4,10 @@ using NetCord.Hosting.Services;
 using NetCord.Hosting.Services.ApplicationCommands;
 
 using DiscordBot.Commands;
+using Swarm.Server.Diagnostics;
 
-Env.Load();
+// Find the nearest .env, including Backend/.env when launched from Swarm.Server.
+Env.TraversePath().Load();
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -16,6 +18,7 @@ builder.Configuration["Discord:Token"] =
 // Add services to the container.
 builder.Services.AddControllers();
 builder.Services.AddOpenApi();
+builder.Services.AddSingleton<ConnectionDiagnostics>();
 
 // Discord Gateway
 builder.Services
@@ -23,6 +26,9 @@ builder.Services
     .AddApplicationCommands();
 
 var app = builder.Build();
+
+// Start the diagnostics uptime clock during application startup.
+_ = app.Services.GetRequiredService<ConnectionDiagnostics>();
 
 // Registracija Discord command modulov
 app.AddModules(typeof(PingCommand).Assembly);
