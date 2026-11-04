@@ -5,6 +5,9 @@ using NetCord.Hosting.Services.ApplicationCommands;
 
 using DiscordBot.Commands;
 using Swarm.Server.Diagnostics;
+using Swarm.Server.Connections;
+using System.Threading.RateLimiting;
+using Microsoft.AspNetCore.RateLimiting;
 
 // Find the nearest .env, including Backend/.env when launched from Swarm.Server.
 Env.TraversePath().Load();
@@ -19,6 +22,21 @@ builder.Configuration["Discord:Token"] =
 builder.Services.AddControllers();
 builder.Services.AddOpenApi();
 builder.Services.AddSingleton<ConnectionDiagnostics>();
+builder.Services.AddSingleton(TimeProvider.System);
+builder.Services.AddSingleton<PairingService>();
+builder.Services.AddSingleton<SessionRegistry>();
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    options.AddPolicy("pairing", context => RateLimitPartition.GetFixedWindowLimiter(
+        context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+        _ => new FixedWindowRateLimiterOptions
+        {
+            PermitLimit = 20,
+            Window = TimeSpan.FromMinutes(1),
+            QueueLimit = 0
+        }));
+});
 
 // Discord Gateway
 builder.Services
@@ -49,6 +67,7 @@ app.UseWebSockets(webSocketOptions);
 app.UseHttpsRedirection();
 
 app.UseAuthorization();
+app.UseRateLimiter();
 
 app.MapControllers();
 

@@ -25,6 +25,8 @@
 __pycache__/
 *.py[cod]
 .venv/
+*.egg-info/
+.swarm/
 
 # Frontend dependencies and build output
 node_modules/

@@ -8,7 +8,11 @@ Swarm connects project conversations, issue and feature tracking, and agent sess
 
 This repository is the beginning of a modular rebuild of an earlier Python Discord bot and MCP server. The backend contains an ASP.NET Core Web API, Discord gateway and `/ping` command wiring, a basic WebSocket endpoint, connection diagnostics, and the generated weather example.
 
-The React/TypeScript dashboard has a live Overview page for connection diagnostics and an Admin design preview with fixture data. Authenticated harness sessions, the full Discord workflows, persistence, and the remaining dashboard integrations are not implemented yet. The architecture and workflows below describe the intended system. Harness integration capabilities, including prompt injection into an existing session, still need to be verified for each supported environment.
+The React/TypeScript dashboard has a live Overview page for connection diagnostics and an Admin design preview with fixture data. The Python connector now supports Discord pairing and authenticated multi-session registration, with in-memory backend authentication state. Full Discord workflows, persistence, and the remaining dashboard integrations are not implemented yet. The architecture and workflows below describe the intended system. Harness integration capabilities, including prompt injection into an existing session, still need to be verified for each supported environment.
+
+## Local connector and connection skill
+
+See [Client/README.md](Client/README.md) for installation, Discord pairing, connecting multiple sessions through one local service, protocol details, and verification. The connection skill source is [skills/swarm-connect/SKILL.md](skills/swarm-connect/SKILL.md); register it with Codex through a user-level symlink. This version registers sessions only; MCP tools and prompt delivery are future work.
 
 ## Connection diagnostics
 
@@ -40,7 +44,7 @@ The coursework explanation and individual contributions are in [Paperwork/003-di
 1. People discuss an idea in a Discord thread. An agent can join the discussion when invoked.
 2. An agent can suggest a breakdown or, when asked, create issues and features from that discussion.
 3. A user opens a coding harness in a local project and invokes `/swarm-connect` to connect that existing session.
-4. The local connector registers the session and establishes an authenticated WebSocket connection to the server.
+4. The local connector registers the session over its shared authenticated WebSocket connection to the server.
 5. A permitted person or agent sends a request to a connected session through Discord or Swarm's agent tools.
 6. The agent reads the relevant context through MCP, works locally, and posts significant progress, questions, decisions, and results to Discord.
 7. Work ready for review moves to `verification`. The agent closes the item after the user agrees.
@@ -112,7 +116,7 @@ Each harness needs an adapter for identifying its session, delivering messages, 
 | --- | --- | --- |
 | Central server | C# / ASP.NET Core | Shared project and task services, permissions, session registration, request routing, persistence, and event history. |
 | Discord integration | Module in the central server | Translate Discord interactions into server actions and publish shared updates into threads. |
-| Local connector | Python, planned | Maintain the session's WebSocket connection, expose MCP tools, and use harness-specific adapters to deliver requests. |
+| Local connector | Python | Maintain a shared authenticated WebSocket and register multiple sessions; MCP tools and harness-specific request delivery are planned. |
 | Dashboard API | Part of the central server | Provide snapshots and live updates about projects, sessions, queues, and work. |
 | Dashboard | React / TypeScript, Vite, Tailwind CSS | Live connection diagnostics and an Admin design preview; agent activity and task integrations are planned. |
 | Database | SQLite, planned | Store operational state, tracked items, briefs, document records, relationships, and history. |
@@ -120,7 +124,7 @@ Each harness needs an adapter for identifying its session, delivering messages, 
 
 The backend is one modular application. Discord, dashboard, and connection modules use shared services so that task operations follow the same rules across entry points.
 
-Local connectors will initiate their connections to the server. Each connected harness session is planned to have a WebSocket connection. The current dashboard refreshes diagnostics over HTTP; a dedicated dashboard event stream is planned.
+Local connectors initiate their connections to the server. Each local service shares one WebSocket per authenticated backend origin across its harness sessions. The current dashboard refreshes diagnostics over HTTP; a dedicated dashboard event stream is planned.
 
 The dashboard is a visual monitoring interface. Its physical presentation—browser, touchscreen, or a display with dedicated controls—will be decided later.
 
@@ -132,12 +136,12 @@ Swarm/
 │   └── Swarm.Server/    # ASP.NET Core server
 ├── Frontend/            # React dashboard: live Overview and Admin preview
 ├── Client/             # Local connector, MCP tools, and harness adapters
-├── Skills/             # Session connection skill
+├── skills/             # Session connection skill source
 ├── Paperwork/          # Coursework and project documentation
 └── README.md
 ```
 
-`Client/` and `Skills/` are placeholders.
+`Client/` contains the local service and CLI; `skills/` contains the connection skill source. The older empty `Skills/` placeholder is unused.
 
 ## Responsibilities
 
