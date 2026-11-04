@@ -2,7 +2,7 @@ import { useEffect, useState, type ReactNode } from 'react'
 import { MobileBar } from './MobileBar'
 import { Sidebar } from './Sidebar'
 
-export function AppShell({ connected, children }: { connected: number; children: ReactNode }) {
+export function AppShell({ children }: { children: ReactNode }) {
   const [theme, setTheme] = useState<'dark' | 'light'>('dark')
 
   useEffect(() => {
@@ -20,7 +20,7 @@ export function AppShell({ connected, children }: { connected: number; children:
         Skip to content
       </a>
 
-      <Sidebar connected={connected} theme={theme} onToggleTheme={toggleTheme} />
+      <Sidebar theme={theme} onToggleTheme={toggleTheme} />
       <MobileBar theme={theme} onToggleTheme={toggleTheme} />
 
       <div className="lg:pl-60">
