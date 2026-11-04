@@ -137,7 +137,9 @@ export function OverviewPage() {
       ) : null}
 
       {snapshot ? (
-        <div className="grid gap-9">
+        // grid-cols-1 is minmax(0, 1fr): nowrap tables scroll inside their region
+        // instead of widening the page on narrow screens.
+        <div className="grid grid-cols-1 gap-9">
           <dl className="grid grid-cols-2 gap-4 sm:grid-cols-4">
             {[
               { label: 'Active connections', value: snapshot.activeConnectionCount },
@@ -188,7 +190,8 @@ export function OverviewPage() {
           />
 
           <p className="text-xs text-ink-muted">
-            Counts are from the server’s perspective and reset when it restarts. Connection history keeps the latest 20 disconnections.
+            Counts are from the server’s perspective and reset when it restarts. A local connector holds one
+            connection for all of its sessions. Connection history keeps the latest 20 disconnections.
           </p>
         </div>
       ) : !error ? (
