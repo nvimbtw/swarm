@@ -1,4 +1,5 @@
 using DotNetEnv;
+using NetCord.Rest;
 using NetCord.Hosting.Gateway;
 using NetCord.Hosting.Services;
 using NetCord.Hosting.Services.ApplicationCommands;
@@ -8,6 +9,8 @@ using Swarm.Server.Diagnostics;
 using Swarm.Server.Connections;
 using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.RateLimiting;
+
+using Swarm.Server.Db;
 
 // Find the nearest .env, including Backend/.env when launched from Swarm.Server.
 Env.TraversePath().Load();
@@ -21,6 +24,11 @@ builder.Configuration["Discord:Token"] =
 // Add services to the container.
 builder.Services.AddControllers();
 builder.Services.AddOpenApi();
+
+// database services
+builder.Services.AddSingleton<DatabaseService>();
+builder.Services.AddSingleton<CreateDatabase>();
+
 builder.Services.AddSingleton<ConnectionDiagnostics>();
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<PairingService>();
@@ -45,6 +53,10 @@ builder.Services
 
 var app = builder.Build();
 
+// ustvarjanje database
+var database = app.Services.GetRequiredService<CreateDatabase>();
+await database.InitializeAsync();
+
 // Start the diagnostics uptime clock during application startup.
 _ = app.Services.GetRequiredService<ConnectionDiagnostics>();
 
@@ -61,6 +73,13 @@ var webSocketOptions = new WebSocketOptions
 {
     KeepAliveInterval = TimeSpan.FromMinutes(2)
 };
+
+var gateway = app.Services.GetRequiredService<NetCord.Gateway.GatewayClient>();
+
+var commands = app.Services.GetRequiredService<
+    NetCord.Services.ApplicationCommands.ApplicationCommandService<NetCord.Services.ApplicationCommands.ApplicationCommandContext>>();
+
+await commands.RegisterCommandsAsync(gateway.Rest, gateway.Id);
 
 app.UseWebSockets(webSocketOptions);
 
