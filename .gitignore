@@ -12,6 +12,7 @@
 .env
 .env.*
 !.env.example
+**/myenv.env
 
 # Local SQLite databases and their temporary files
 *.db
