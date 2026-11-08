@@ -8,7 +8,7 @@ using Swarm.Server.Diagnostics;
 namespace Swarm.Server.Controllers;
 
 [ApiController]
-public sealed class SessionSocketController(PairingService pairing, SessionRegistry registry,
+public sealed class SessionSocketController(PairingService pairing, SessionRegistry registry, AgentRouter agents,
     ConnectionDiagnostics diagnostics, IHostApplicationLifetime lifetime,
     ILogger<SessionSocketController> logger) : ControllerBase
 {
@@ -29,7 +29,9 @@ public sealed class SessionSocketController(PairingService pairing, SessionRegis
         var ct = cancellation.Token;
         Guid connectionId = diagnostics.OpenConnection();
         // Fixed limit across fragmented frames, not just each individual frame.
-        var buffer = new byte[16 * 1024 + 1];
+        var buffer = new byte[64 * 1024 + 1];
+        using var sendGate = new SemaphoreSlim(1, 1);
+        agents.Connect(connectionId, SendCore, () => pairing.Authenticate(authorization[7..]) is not null);
         try
         {
             await Send(new { type = "hello", version = 1, ownerId = identity.OwnerId });
@@ -46,9 +48,9 @@ public sealed class SessionSocketController(PairingService pairing, SessionRegis
                         return;
                     }
                     count += received.Count;
-                    if (count > 16 * 1024 || received.MessageType != WebSocketMessageType.Text)
+                    if (count > 64 * 1024 || received.MessageType != WebSocketMessageType.Text)
                     {
-                        await Close(WebSocketCloseStatus.MessageTooBig, "Expected JSON text up to 16 KiB");
+                        await Close(WebSocketCloseStatus.MessageTooBig, "Expected JSON text up to 64 KiB");
                         return;
                     }
                 } while (!received.EndOfMessage);
@@ -68,6 +70,11 @@ public sealed class SessionSocketController(PairingService pairing, SessionRegis
                         throw new JsonException("Invalid envelope");
                     switch (message.GetProperty("type").GetString())
                     {
+                        case "agent.reply":
+                        case "agent.event":
+                            await agents.AcceptAsync(connectionId, message.GetProperty("type").GetString()!,
+                                message.GetProperty("payload"));
+                            break;
                         case "session.register":
                             var registration = message.GetProperty("payload").Deserialize<SessionRegistration>(JsonOptions);
                             if (registration is null || registration.SessionId == Guid.Empty ||
@@ -106,22 +113,35 @@ public sealed class SessionSocketController(PairingService pairing, SessionRegis
         finally
         {
             registry.Disconnect(connectionId);
+            await agents.DisconnectAsync(connectionId);
             diagnostics.CloseConnection(connectionId);
         }
 
-        async Task Send(object message)
+        Task Send(object message) => SendCore(message, ct);
+
+        async Task SendCore(object message, CancellationToken token)
         {
-            var started = Stopwatch.GetTimestamp();
-            await socket.SendAsync(JsonSerializer.SerializeToUtf8Bytes(message, JsonOptions), WebSocketMessageType.Text, true, ct);
-            diagnostics.RecordSent(connectionId, Stopwatch.GetElapsedTime(started).TotalMilliseconds);
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct, token);
+            timeout.CancelAfter(TimeSpan.FromSeconds(10));
+            await sendGate.WaitAsync(timeout.Token);
+            try
+            {
+                var started = Stopwatch.GetTimestamp();
+                await socket.SendAsync(JsonSerializer.SerializeToUtf8Bytes(message, JsonOptions),
+                    WebSocketMessageType.Text, true, timeout.Token);
+                diagnostics.RecordSent(connectionId, Stopwatch.GetElapsedTime(started).TotalMilliseconds);
+            }
+            finally { sendGate.Release(); }
         }
 
         async Task Close(WebSocketCloseStatus status, string reason)
         {
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
             timeout.CancelAfter(TimeSpan.FromSeconds(5));
+            await sendGate.WaitAsync(timeout.Token);
             try { await socket.CloseOutputAsync(status, reason, timeout.Token); }
             catch (OperationCanceledException) when (!ct.IsCancellationRequested) { socket.Abort(); }
+            finally { sendGate.Release(); }
         }
     }
 }

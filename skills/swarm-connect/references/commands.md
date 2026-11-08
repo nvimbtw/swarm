@@ -6,6 +6,7 @@ All commands return JSON except interactive input and `serve`, which runs until 
 swarm serve
 swarm status
 swarm connect --backend http://localhost:5142 --project swarm --name backend-codex --harness codex --workspace /absolute/project
+swarm connect --backend http://localhost:5142 --project swarm --name backend-codex --harness codex --workspace /absolute/project --harness-session-id <actual-codex-thread-uuid> --control
 swarm pair-start --backend http://localhost:5142
 swarm pair-complete --backend http://localhost:5142 --code-stdin
 swarm sessions --backend http://localhost:5142
@@ -25,3 +26,7 @@ The initial local transport uses a private Unix socket and supports Linux/macOS.
 States: `registered` means acknowledged by the backend; `pending` means queued locally while connecting; `pairing_required` requires Discord verification; `rejected` means the backend refused the session. `authenticated` confirms credential issuance, not session registration. `swarm status` is local state; `swarm sessions` queries backend registrations owned by this Discord user.
 
 The service reconnects and registers attached sessions again after transport loss. Service restarts discard session registrations but retain credentials; reconnect each live conversation. Backend restarts invalidate credentials until persistence is implemented. Disconnect explicitly when finished: automatic harness lifecycle tracking is not available.
+
+For native Codex CLI delivery, use `--control` with a reliable actual Codex thread UUID. The existing daemon must expose its control socket (`codex app-server proxy`; optionally select it with `--codex-socket /absolute/control.sock`). Swarm validates the thread workspace and native queue capability. Other harnesses, T3-managed sessions, missing IDs, and metadata-only registrations cannot be targeted by `/agent`. Never launch a second harness or assume an ID based on a directory/name. Reconnect an existing attachment with `--control` to enable delivery.
+
+Discord `/agent` accepts required `session` and `prompt`, optional `model`, `reasoning`, and `delivery` (`Queue` by default, `Inject` explicitly). Solo accepts only the paired owner; Swarm accepts other bot users without project/guild scoping. Queue waits for idle; Inject requires a currently active turn and rejects model/reasoning changes. Explicit settings persist in Codex. Queue acknowledgments mean locally queued; final results appear in the originating Discord channel. Keep the native CLI open for approvals. Full behavior and wire envelopes are in [Client/README.md](../../../Client/README.md).

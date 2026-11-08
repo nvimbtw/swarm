@@ -8,11 +8,11 @@ Swarm connects project conversations, issue and feature tracking, and agent sess
 
 This repository is the beginning of a modular rebuild of an earlier Python Discord bot and MCP server. The backend contains an ASP.NET Core Web API, Discord gateway and `/ping` command wiring, a basic WebSocket endpoint, connection diagnostics, and the generated weather example.
 
-The React/TypeScript dashboard has a live Overview page for connection diagnostics and an Admin design preview with fixture data. The Python connector now supports Discord pairing and authenticated multi-session registration, with in-memory backend authentication state. Full Discord workflows, persistence, and the remaining dashboard integrations are not implemented yet. The architecture and workflows below describe the intended system. Harness integration capabilities, including prompt injection into an existing session, still need to be verified for each supported environment.
+The React/TypeScript dashboard has a live Overview page for connection diagnostics and an Admin design preview with fixture data. The Python connector now supports Discord pairing and authenticated multi-session registration, with in-memory backend authentication state. Discord `/agent` can route prompts to controllable native Codex CLI sessions, with queue/inject delivery, model/reasoning options, Solo/Swarm access rules, and results returned to Discord. Persistence, MCP, other harness adapters, and the remaining dashboard integrations are not implemented yet. The architecture and workflows below describe the intended system. Native Codex uses its shared app-server daemon; other harness environments still need adapters.
 
 ## Local connector and connection skill
 
-See [Client/README.md](Client/README.md) for installation, Discord pairing, connecting multiple sessions through one local service, protocol details, and verification. The connection skill source is [skills/swarm-connect/SKILL.md](skills/swarm-connect/SKILL.md); register it with Codex through a user-level symlink. This version registers sessions only; MCP tools and prompt delivery are future work.
+See [Client/README.md](Client/README.md) for installation, Discord pairing, connecting multiple sessions through one local service, protocol details, and verification. The connection skill source is [skills/swarm-connect/SKILL.md](skills/swarm-connect/SKILL.md); register it with Codex through a user-level symlink. Native Codex CLI attachments using `--control` receive `/agent` requests over the same shared WebSocket; MCP tools remain future work.
 
 ## Connection diagnostics
 
@@ -37,7 +37,7 @@ websocat ws://localhost:5142/ws
 
 Watch the active connection and sent count appear, type a line to increase the received count, and exit the client to see its final counters in recent disconnections. The backend must be running separately. Vite proxies frontend `/api` requests to the backend at `http://127.0.0.1:5142` by default; see [Frontend/README.md](Frontend/README.md) for setup and deployment details.
 
-The coursework explanation and individual contributions are in [Paperwork/003-diagnostika.md](Paperwork/003-diagnostika.md) and [Paperwork/Dokumentacija.md](Paperwork/Dokumentacija.md). No builds, automated tests, or application runs were performed by the coding assistant during these changes.
+The coursework explanation and individual contributions are in [Paperwork/003-diagnostika.md](Paperwork/003-diagnostika.md) and [Paperwork/Dokumentacija.md](Paperwork/Dokumentacija.md). For connector and agent-routing verification, see [Client/README.md](Client/README.md#verification).
 
 ## How it will work
 
@@ -100,7 +100,7 @@ Users choose a mode when connecting:
 
 Multiple agents can contribute to the same item and discuss their work in its thread. The server attributes agent messages to the authenticated session and records who initiated a request and which session handled it.
 
-Requests support `queue` and `inject` delivery modes. Sending a message and switching an active assignment are distinct actions. The exact Discord commands and the interaction for resuming an agent after a human answer are still being designed.
+Requests support `queue` and `inject` delivery modes. Sending a message and switching an active assignment are distinct actions. Discord `/agent session:… prompt:…` defaults to queue, with optional model/reasoning and explicit injection. Local approvals and questions remain in Codex; MCP and Discord question forwarding are still planned.
 
 Harness support is planned in this order:
 
@@ -116,7 +116,7 @@ Each harness needs an adapter for identifying its session, delivering messages, 
 | --- | --- | --- |
 | Central server | C# / ASP.NET Core | Shared project and task services, permissions, session registration, request routing, persistence, and event history. |
 | Discord integration | Module in the central server | Translate Discord interactions into server actions and publish shared updates into threads. |
-| Local connector | Python | Maintain a shared authenticated WebSocket and register multiple sessions; MCP tools and harness-specific request delivery are planned. |
+| Local connector | Python | Maintain a shared authenticated WebSocket, register multiple sessions, and deliver native Codex requests/results; MCP and other adapters are planned. |
 | Dashboard API | Part of the central server | Provide snapshots and live updates about projects, sessions, queues, and work. |
 | Dashboard | React / TypeScript, Vite, Tailwind CSS | Live connection diagnostics and an Admin design preview; agent activity and task integrations are planned. |
 | Database | SQLite, planned | Store operational state, tracked items, briefs, document records, relationships, and history. |

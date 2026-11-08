@@ -53,7 +53,8 @@ async def execute(args, parser):
                 raise ValueError("Invalid session name, project, or harness.")
         request.update(workspace=str(workspace), project=project, name=name, harness=harness,
                        mode=mode, harness_session_id=args.harness_session_id,
-                       name_explicit=args.name is not None, mode_explicit=args.mode is not None)
+                       name_explicit=args.name is not None, mode_explicit=args.mode is not None,
+                       control=args.control, codex_socket=args.codex_socket)
     if args.command == "disconnect":
         request["session_id"] = args.session
     result = await rpc(home, request)
@@ -94,6 +95,8 @@ def main():
             sub.add_argument("--name")
             sub.add_argument("--harness", required=True)
             sub.add_argument("--harness-session-id")
+            sub.add_argument("--control", action="store_true", help="Enable Discord delivery to this native Codex CLI thread")
+            sub.add_argument("--codex-socket", help="Optional absolute path to the existing Codex daemon control socket")
             sub.add_argument("--mode", choices=["solo", "swarm"])
         if command == "disconnect":
             sub.add_argument("--session", required=True)

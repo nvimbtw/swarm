@@ -10,6 +10,7 @@ import uuid
 import aiohttp
 
 from .storage import Storage, backend_origin
+from .codex import CodexAdapter, CodexRpc, CodexError
 
 
 class BackendError(RuntimeError):
@@ -24,6 +25,9 @@ class BackendLink:
         self.pending = {}
         self.ws = None
         self.lock = asyncio.Lock()
+        self.send_lock = asyncio.Lock()
+        self.incoming = set()
+        self.handled = {}
         self.task = asyncio.create_task(self.run())
 
     async def run(self):
@@ -41,6 +45,7 @@ class BackendLink:
                         heartbeat=20, max_msg_size=64 * 1024,
                     ) as ws:
                         self.ws = ws
+                        self.handled.clear()
                         hello = await asyncio.wait_for(ws.receive_json(), 10)
                         if hello.get("type") != "hello" or hello.get("version") != 1:
                             raise BackendError("unsupported_protocol")
@@ -86,9 +91,99 @@ class BackendLink:
             if message.type != aiohttp.WSMsgType.TEXT:
                 break
             result = json.loads(message.data)
+            if result.get("version") == 1 and result.get("type") in {"agent.submit", "agent.describe"}:
+                if len(self.incoming) >= 100:
+                    await self.reply_agent(ws, result, {"status": "failed", "error": "connector_busy"})
+                    continue
+                task = asyncio.create_task(self.agent_request(ws, result))
+                self.incoming.add(task)
+                task.add_done_callback(self.incoming.discard)
+                continue
             future = self.pending.get(result.get("id"))
             if future and not future.done():
                 future.set_result(result)
+
+    async def send(self, ws, message):
+        # Enforce the wire limit after JSON escaping, including non-ASCII output.
+        encoded = json.dumps(message, ensure_ascii=False)
+        while len(encoded.encode()) > 64 * 1024:
+            payload = message.get("payload", {})
+            if payload.get("output"):
+                payload["output"] = payload["output"][:len(payload["output"]) // 2]
+                payload["truncated"] = True
+            elif payload.get("models"):
+                payload["models"].pop()
+            else:
+                raise ValueError("message_too_large")
+            encoded = json.dumps(message, ensure_ascii=False)
+        async with self.send_lock:
+            await ws.send_str(encoded)
+
+    async def reply_agent(self, ws, message, response):
+        payload = message.get("payload", {})
+        await self.send(ws, {"version": 1, "id": message["id"], "type": "agent.reply",
+            "payload": {"requestId": payload.get("requestId"), "sessionId": payload.get("sessionId"), **response}})
+
+    async def agent_request(self, ws, message):
+        ready = asyncio.Event()
+        try:
+            payload = message["payload"]
+            request_id = str(uuid.UUID(payload["requestId"]))
+            if request_id != message["id"]:
+                raise CodexError("invalid_request")
+            if request_id in self.handled:
+                response = await self.handled[request_id]
+                await self.reply_agent(ws, message, response)
+                return
+            future = asyncio.get_running_loop().create_future()
+            self.handled[request_id] = future
+            # Keep in-flight IDs as well as recent acknowledgments; never submit a duplicate.
+            if len(self.handled) > 500:
+                for old_id, old in list(self.handled.items()):
+                    if old.done() and old_id != request_id:
+                        self.handled.pop(old_id)
+                        break
+            session = self.sessions.get(payload["sessionId"])
+            credential = self.service.storage.credentials.get(self.origin, {})
+            def alive():
+                return (self.ws is ws and not ws.closed and
+                    self.sessions.get(payload["sessionId"]) is session and session is not None and
+                    (session["registration"]["mode"] == "swarm" or
+                     payload.get("senderId") == credential.get("ownerId")))
+            if not session or not session["registration"].get("control") or not alive():
+                raise CodexError("session_unavailable_or_not_allowed")
+            adapter = self.service.adapters.get(session.get("codex_socket"))
+            if not adapter:
+                raise CodexError("codex_unavailable")
+            async def emit(update):
+                await ready.wait()
+                if self.ws is ws and not ws.closed:
+                    try:
+                        await self.send(ws, {"version": 1, "id": str(uuid.uuid4()), "type": "agent.event",
+                            "payload": {"requestId": request_id, "sessionId": payload["sessionId"], **update}})
+                    except (aiohttp.ClientError, OSError):
+                        pass  # Never replay accepted work after a transport failure.
+            if message["type"] == "agent.describe":
+                response = {"status": "available", **await adapter.describe(session)}
+            else:
+                if (not isinstance(payload.get("prompt"), str) or not payload["prompt"].strip() or
+                        len(payload["prompt"]) > 4000 or payload.get("delivery") not in {"queue", "inject"}):
+                    raise CodexError("invalid_request")
+                response = await adapter.submit(session, payload, emit, alive, ready)
+        except (CodexError, ValueError, KeyError, TypeError) as error:
+            code = str(error) if isinstance(error, CodexError) else "invalid_request"
+            response = {"status": "unknown" if code in {"delivery_unknown", "codex_connection_lost"} else "failed",
+                        "error": code}
+        except (OSError, TimeoutError):
+            response = {"status": "unknown", "error": "delivery_unknown"}
+        try:
+            if "future" in locals() and not future.done():
+                future.set_result(response)
+            await self.reply_agent(ws, message, response)
+        except (aiohttp.ClientError, OSError):
+            pass
+        finally:
+            ready.set()
 
     async def request(self, kind, payload=None):
         if self.ws is None or self.ws.closed:
@@ -97,7 +192,7 @@ class BackendLink:
         future = asyncio.get_running_loop().create_future()
         self.pending[request_id] = future
         try:
-            await self.ws.send_json({"version": 1, "id": request_id, "type": kind, "payload": payload})
+            await self.send(self.ws, {"version": 1, "id": request_id, "type": kind, "payload": payload})
             result = await asyncio.wait_for(future, 10)
             if result.get("type") == "error":
                 raise BackendError(result.get("error", "backend_error"))
@@ -117,6 +212,9 @@ class BackendLink:
     async def close(self):
         self.task.cancel()
         await asyncio.gather(self.task, return_exceptions=True)
+        for task in list(self.incoming):
+            task.cancel()
+        await asyncio.gather(*self.incoming, return_exceptions=True)
 
 
 class Connector:
@@ -124,6 +222,7 @@ class Connector:
         self.storage, self.http = storage, http
         self.links = {}
         self.pairings = {}
+        self.adapters = {}
 
     async def post(self, origin, path, payload):
         async with self.http.post(origin + path, json=payload, allow_redirects=False) as response:
@@ -176,7 +275,21 @@ class Connector:
                                  s["workspace"] == request["workspace"] and
                                  s["registration"]["harness"] == request["harness"] and
                                  s["registration"]["projectId"] == request["project"]), None)
+                control = bool(request.get("control"))
+                socket = request.get("codex_socket")
+                if control:
+                    if request["harness"] != "codex" or not harness_id:
+                        raise BackendError("codex_control_requires_thread_id")
+                    try:
+                        uuid.UUID(harness_id)
+                        adapter = self.adapters.setdefault(socket, CodexAdapter(CodexRpc(socket)))
+                        await adapter.attach({"harness_session_id": harness_id, "workspace": request["workspace"]})
+                    except (ValueError, CodexError) as error:
+                        raise BackendError(str(error) if isinstance(error, CodexError) else "invalid_codex_thread_id") from None
                 if existing:
+                    if control:
+                        existing["registration"]["control"] = True
+                        existing["codex_socket"] = socket
                     if request.get("name_explicit"):
                         existing["registration"]["name"] = request["name"]
                     if request.get("mode_explicit"):
@@ -193,8 +306,9 @@ class Connector:
                     raise BackendError("session_limit")
                 session_id = str(uuid.uuid4())
                 session = {"registration": {"sessionId": session_id, "name": request["name"],
-                           "projectId": request["project"], "harness": request["harness"], "mode": request["mode"]},
+                           "projectId": request["project"], "harness": request["harness"], "mode": request["mode"], "control": control},
                            "workspace": request["workspace"], "harness_session_id": harness_id,
+                           "codex_socket": socket,
                            "state": "pending"}
                 link.sessions[session_id] = session
                 if link.state == "connected":
@@ -273,4 +387,5 @@ async def serve(home):
                     await stopped.wait()
             finally:
                 await asyncio.gather(*(link.close() for link in connector.links.values()))
+                await asyncio.gather(*(adapter.close() for adapter in connector.adapters.values()))
                 storage.socket.unlink(missing_ok=True)
