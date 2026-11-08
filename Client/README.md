@@ -29,13 +29,15 @@ Client/.venv/bin/swarm status
 Client/.venv/bin/swarm sessions
 ```
 
-`connect` stores preferences in the workspace's `.swarm/config.json`. For a second harness, connect with another name and its workspace. A real `--harness-session-id`, when available, makes reconnecting that same harness idempotent. Without it, each invocation creates a new registration; retain the returned ID to disconnect it later.
+`connect` stores preferences in the workspace's `.swarm/config.json`. For a second harness, connect with another name and its workspace. A real `--harness-session-id`, when available, makes reconnecting that same harness idempotent. Native Codex defaults to verified delivery and uses the current `CODEX_THREAD_ID` when available; other harnesses or explicit `--registration-only` can register metadata. Retain the returned Swarm ID to disconnect it later.
 
 For the full CLI contract and states, see [the skill command reference](../skills/swarm-connect/references/commands.md). Use `swarm disconnect --session <id>` to remove one registration. Stop the service with Ctrl+C only when all attached sessions should go offline. Service restarts lose attached sessions, but keep credentials.
 
+`swarm status` reports the running connector version. Updating files or invoking the skill again does not reload an already running Python process. After a connector update, restart that service and reattach its sessions, preserving any active work. A successful `connect` includes `delivery.ready`; metadata-only registrations are intentionally excluded from Discord's session picker.
+
 ## Discord → native Codex CLI
 
-Use a Codex CLI version exposing `app-server proxy`, `thread/queue/*`, and `thread/settings/update` (the implementation was checked against the 0.166.0 protocol schema). The target conversation must live on the existing local app-server daemon. Swarm attaches to that daemon; it does not start a second conversation or resume the same history in a separate Codex process. IDE extensions and T3-managed Codex sessions need separate adapters.
+Use a Codex daemon exposing its Unix WebSocket control socket, `thread/queue/*`, and `thread/settings/update` (the implementation was checked against the 0.166.0 protocol schema). The target conversation must live on the existing local app-server daemon. Swarm attaches to that daemon; it does not start a second conversation or resume the same history in a separate Codex process. IDE extensions and T3-managed Codex sessions need separate adapters.
 
 Pair as above, then connect the **actual existing Codex thread UUID**, from the current native CLI session:
 
@@ -45,7 +47,7 @@ swarm connect --backend http://localhost:5142 --project swarm \
   --harness-session-id <actual-codex-thread-uuid> --control --mode solo
 ```
 
-`--control` verifies that the daemon can read the thread, that its workspace matches, and that its queue API is available before advertising Discord delivery. A custom daemon can be selected with `--codex-socket /absolute/control.sock`; this stays local. Without `--control`, connection still registers metadata, preserving support for other harnesses. Reconnect an existing metadata registration with `--control` to enable delivery. Do not use a T3 thread ID or infer a Codex thread from a workspace/name.
+Codex connections enable control by default (`--control` is an explicit alias). The CLI uses the current `CODEX_THREAD_ID` if no explicit thread ID is supplied. It verifies that the thread is already live on that daemon, accepts direct input, matches the workspace, and exposes its queue API before advertising Discord delivery. The connector performs the WebSocket Upgrade handshake over `$CODEX_HOME/app-server-control/app-server-control.sock` (defaulting to `~/.codex`). A custom daemon can be selected with `--codex-socket /absolute/control.sock`; this stays local. `codex app-server proxy` is a raw byte proxy and is not treated as a JSONL app-server transport. Use `--registration-only` explicitly to register metadata without Discord delivery. Other harnesses default to metadata. A failed Codex control check returns an error; it never silently falls back to metadata. Reconnect an existing metadata registration with `--control` to enable delivery. Do not use a T3 thread ID or infer a Codex thread from a workspace/name.
 
 In Discord:
 
@@ -150,4 +152,4 @@ dotnet run --project Backend/Swarm.Server.Tests
 Client/.venv/bin/python -m unittest discover -s Client/tests -v
 ```
 
-The C# executable checks pairing expiry, single-use codes, attempt limits, identity binding, credential replacement, and registration ownership. With `--serve` it is a separate loopback-only fixture host used by Python integration tests; its simulated Discord approval endpoint is absent from the production backend. The Python tests exercise actual ASP.NET HTTP/WebSocket controllers, the local service, and a deterministic fake Codex daemon proxy without a Discord token or inference API call. They cover mode permissions, two controllable sessions sharing one socket, queue/inject behavior, correlated results, disconnect cancellation, literal prompt preservation, unsupported options, and atomic-start races. A live native Codex and Discord smoke test is still needed to verify real inference, local approval routing, bot invitation, autocomplete, and result publication in the target server.
+The C# executable checks pairing expiry, single-use codes, attempt limits, identity binding, credential replacement, and registration ownership. With `--serve` it is a separate loopback-only fixture host used by Python integration tests; its simulated Discord approval endpoint is absent from the production backend. The Python tests exercise actual ASP.NET HTTP/WebSocket controllers, the local service, and a real Unix-socket WebSocket fixture implementing deterministic Codex replies without a Discord token or inference API call. They cover mode permissions, two controllable sessions sharing one socket, queue/inject behavior, correlated results, disconnect cancellation, literal prompt preservation, unsupported options, and atomic-start races. The transport was also checked against a live Codex 0.167.0 daemon for handshake, thread attachment, native queue availability, and model listing. Real inference, local approval routing, and Discord result publication still require a live user smoke test.

@@ -15,6 +15,7 @@ import aiohttp
 from swarm_client.cli import rpc
 from swarm_client.storage import backend_origin
 from swarm_client.service import BackendLink
+from fixtures.codex_daemon import CodexDaemon
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -70,8 +71,8 @@ class ConnectorIntegrationTests(unittest.IsolatedAsyncioTestCase):
             "dotnet", str(FIXTURE), "--serve", stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.origin = (await asyncio.wait_for(self.backend.stdout.readline(), 15)).decode().strip()
         self.assertTrue(self.origin.startswith("http://127.0.0.1:"), self.origin)
-        environment = {**os.environ, "PATH": str(Path(__file__).parent / "fixtures") + os.pathsep + os.environ["PATH"],
-                       "SWARM_TEST_CODEX_ROOT": self.temp.name}
+        self.daemon = await CodexDaemon(Path(self.temp.name)).start()
+        environment = {**os.environ, "CODEX_HOME": self.temp.name}
         self.service = await asyncio.create_subprocess_exec(
             sys.executable, "-m", "swarm_client.cli", "--home", str(self.home), "serve",
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=environment)
@@ -91,6 +92,7 @@ class ConnectorIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 await process.wait()
             errors = (await process.stderr.read()).decode()
             self.assertNotIn("Traceback", errors)
+        await self.daemon.close()
         self.temp.cleanup()
 
     async def call(self, operation, **kwargs):
@@ -238,6 +240,36 @@ class ConnectorIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cancelled[-1]["update"]["status"], "failed")
         self.assertEqual(cancelled[-1]["update"]["error"], "request_cancelled")
 
+    async def test_cli_defaults_to_verified_control_and_reports_readiness(self):
+        await self.pair()
+        thread_id = str(uuid.uuid4())
+        async def cli(*extra, thread_env=thread_id):
+            env = dict(os.environ)
+            env.pop("CODEX_THREAD_ID", None)
+            if thread_env:
+                env["CODEX_THREAD_ID"] = thread_env
+            process = await asyncio.create_subprocess_exec(sys.executable, "-m", "swarm_client.cli",
+                "--home", str(self.home), "connect", "--backend", self.origin,
+                "--workspace", self.temp.name, "--harness", "codex", "--project", "swarm",
+                *extra, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+            output, error = await process.communicate()
+            self.assertFalse(error, error.decode())
+            return process.returncode, json.loads(output)
+        code, controlled = await cli()
+        self.assertEqual(code, 0, controlled)
+        self.assertTrue(controlled["delivery"]["ready"])
+        self.assertTrue(controlled["session"]["registration"]["control"])
+        self.assertEqual(controlled["session"]["harness_session_id"], thread_id)
+        code, missing_id = await cli(thread_env=None)
+        self.assertNotEqual(code, 0)
+        self.assertEqual(missing_id["error"], "codex_control_requires_thread_id")
+        code, metadata = await cli("--registration-only")
+        self.assertEqual(code, 0, metadata)
+        self.assertFalse(metadata["delivery"]["ready"])
+        self.assertEqual(metadata["delivery"]["state"], "registration_only")
+        self.assertEqual(metadata["session"]["registration"]["sessionId"],
+                         controlled["session"]["registration"]["sessionId"])
+
     async def test_cli_saves_project_preferences_without_credentials(self):
         await self.pair()
         workspace = Path(self.temp.name) / "project"
@@ -253,18 +285,18 @@ class ConnectorIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
         result = await cli("connect", "--workspace", str(workspace), "--backend", self.origin,
                            "--project", "swarm", "--harness", "codex", "--name", "my-agent",
-                           "--harness-session-id", "live-thread")
+                           "--harness-session-id", "live-thread", "--registration-only")
         self.assertEqual(result["status"], "registered")
         saved = json.loads((workspace / ".swarm/config.json").read_text())
         self.assertEqual(saved["backend"], self.origin)
         self.assertEqual(saved["project_id"], "swarm")
         self.assertNotIn("token", json.dumps(saved))
         again = await cli("connect", "--workspace", str(workspace), "--harness", "codex",
-                          "--harness-session-id", "live-thread")
+                          "--harness-session-id", "live-thread", "--registration-only")
         self.assertEqual(again["session"]["registration"]["sessionId"], result["session"]["registration"]["sessionId"])
         self.assertEqual(again["session"]["registration"]["name"], "my-agent")
         changed = await cli("connect", "--workspace", str(workspace), "--harness", "codex",
-                            "--harness-session-id", "live-thread", "--name", "renamed", "--mode", "swarm")
+                            "--harness-session-id", "live-thread", "--registration-only", "--name", "renamed", "--mode", "swarm")
         self.assertEqual(changed["session"]["registration"]["name"], "renamed")
         self.assertEqual(changed["session"]["registration"]["mode"], "swarm")
         removed = await cli("disconnect", "--workspace", str(workspace), "--session",

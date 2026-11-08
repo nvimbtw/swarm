@@ -8,15 +8,15 @@ from unittest.mock import patch
 import uuid
 
 from swarm_client.codex import CodexAdapter, CodexError, CodexRpc
+from fixtures.codex_daemon import CodexDaemon
 
 
 class CodexTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
-        self.env = patch.dict(os.environ, {
-            "PATH": str(Path(__file__).parent / "fixtures") + os.pathsep + os.environ["PATH"],
-            "SWARM_TEST_CODEX_ROOT": str(self.root)})
+        self.daemon = await CodexDaemon(self.root).start()
+        self.env = patch.dict(os.environ, {"CODEX_HOME": str(self.root)})
         self.env.start()
         self.rpc = CodexRpc()
         self.adapter = CodexAdapter(self.rpc)
@@ -26,6 +26,7 @@ class CodexTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self):
         await self.adapter.close()
+        await self.daemon.close()
         self.env.stop()
         self.temp.cleanup()
 
@@ -112,3 +113,23 @@ class CodexTests(unittest.IsolatedAsyncioTestCase):
             "turn": {"id": "local-turn", "status": "completed"}})
         await self.wait_events("completed")
         self.assertEqual(self.events[-1]["output"], "new answer")
+
+    async def test_unloaded_thread_is_not_silently_resumed_in_another_server(self):
+        before = len([c for c in self.calls() if c["method"] == "thread/resume"])
+        (self.root / "unloaded").touch()
+        with self.assertRaisesRegex(CodexError, "not_loaded_on_daemon"):
+            await self.adapter.attach(self.session)
+        after = len([c for c in self.calls() if c["method"] == "thread/resume"])
+        self.assertEqual(before, after)
+
+    async def test_custom_socket_and_absent_daemon(self):
+        rpc = CodexRpc(str(self.daemon.socket))
+        try:
+            await rpc.connect()
+            self.assertTrue((await rpc.call("model/list", {}))["data"])
+        finally:
+            await rpc.close()
+        rpc = CodexRpc(str(self.root / "does-not-exist.sock"))
+        with self.assertRaisesRegex(CodexError, "check_daemon_socket"):
+            await rpc.connect()
+        self.assertIsNone(rpc.http)

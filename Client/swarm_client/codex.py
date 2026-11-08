@@ -1,9 +1,13 @@
 """Codex CLI control through its existing app-server daemon, never a second harness."""
 import asyncio
-import contextlib
 import json
+import os
 from pathlib import Path
 import uuid
+
+import aiohttp
+
+from . import __version__
 
 
 class CodexError(RuntimeError):
@@ -15,7 +19,8 @@ class CodexError(RuntimeError):
 class CodexRpc:
     def __init__(self, socket=None):
         self.socket = socket
-        self.process = None
+        self.http = None
+        self.ws = None
         self.pending = {}
         self.lock = asyncio.Lock()
         self.write_lock = asyncio.Lock()
@@ -25,30 +30,33 @@ class CodexRpc:
 
     async def connect(self):
         async with self.lock:
-            if self.process and self.process.returncode is None and self.reader and not self.reader.done():
+            if self.ws and not self.ws.closed and self.reader and not self.reader.done():
                 return
-            command = ["codex", "app-server", "proxy"]
-            if self.socket:
-                command += ["--sock", self.socket]
+            await self.close()
+            home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))).expanduser()
+            socket = Path(self.socket).expanduser() if self.socket else home / "app-server-control/app-server-control.sock"
             try:
-                self.process = await asyncio.create_subprocess_exec(
-                    *command, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.DEVNULL, limit=8 * 1024 * 1024)
+                # The daemon control socket carries WebSocket frames. The CLI's raw
+                # byte proxy is not the app-server JSONL stdio transport.
+                self.http = aiohttp.ClientSession(connector=aiohttp.UnixConnector(path=str(socket)),
+                    timeout=aiohttp.ClientTimeout(total=8))
+                self.ws = await self.http.ws_connect("http://localhost/", max_msg_size=8 * 1024 * 1024)
                 self.reader = asyncio.create_task(self.receive())
                 await self.call("initialize", {"clientInfo": {"name": "swarm_connector",
-                    "title": "Swarm", "version": "0.2.0"},
+                    "title": "Swarm", "version": __version__},
                     "capabilities": {"experimentalApi": True}})
                 await self.write({"method": "initialized"})
-            except (OSError, CodexError, TimeoutError):
+            except (OSError, aiohttp.ClientError, CodexError, TimeoutError):
                 await self.close()
-                raise CodexError("codex_unavailable") from None
+                raise CodexError("codex_unavailable_check_daemon_socket") from None
 
     async def write(self, message):
         async with self.write_lock:
             try:
-                self.process.stdin.write((json.dumps(message) + "\n").encode())
-                await self.process.stdin.drain()
-            except (AttributeError, OSError):
+                if not self.ws or self.ws.closed:
+                    raise CodexError("codex_connection_lost")
+                await self.ws.send_json(message)
+            except (aiohttp.ClientError, OSError):
                 raise CodexError("codex_connection_lost") from None
 
     async def call(self, method, params):
@@ -66,8 +74,10 @@ class CodexRpc:
 
     async def receive(self):
         try:
-            while line := await self.process.stdout.readline():
-                message = json.loads(line)
+            async for frame in self.ws:
+                if frame.type != aiohttp.WSMsgType.TEXT:
+                    break
+                message = json.loads(frame.data)
                 future = self.pending.get(message.get("id"))
                 if future and not future.done():
                     if "error" in message:
@@ -79,7 +89,7 @@ class CodexRpc:
                     self.notification(message["method"], message.get("params", {}))
                 # Approval/user-input requests stay in the local Codex UI. Never approve
                 # them or forward their potentially sensitive arguments to Discord.
-        except (OSError, ValueError):
+        except (aiohttp.ClientError, OSError, ValueError):
             pass
         finally:
             for future in list(self.pending.values()):
@@ -113,18 +123,16 @@ class CodexRpc:
                     break
 
     async def close(self):
-        if self.process and self.process.returncode is None:
-            with contextlib.suppress(ProcessLookupError):
-                self.process.terminate()  # Only the proxy; never stop the shared daemon.
-            try:
-                await asyncio.wait_for(self.process.wait(), 3)
-            except TimeoutError:
-                self.process.kill()
-                await self.process.wait()
         if self.reader:
             self.reader.cancel()
             await asyncio.gather(self.reader, return_exceptions=True)
-        self.process = None
+            self.reader = None
+        if self.ws:
+            await self.ws.close()
+            self.ws = None
+        if self.http:
+            await self.http.close()
+            self.http = None
 
 
 class CodexAdapter:
@@ -140,6 +148,8 @@ class CodexAdapter:
         thread = (await self.rpc.call("thread/read", {"threadId": thread_id}))["thread"]
         if Path(thread["cwd"]).resolve() != Path(session["workspace"]).resolve():
             raise CodexError("codex_workspace_mismatch")
+        if thread.get("canAcceptDirectInput") is None:
+            raise CodexError("codex_session_not_loaded_on_daemon")
         if thread.get("canAcceptDirectInput") is False:
             raise CodexError("codex_input_not_supported")
         try:

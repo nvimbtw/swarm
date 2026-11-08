@@ -9,6 +9,7 @@ import uuid
 
 import aiohttp
 
+from . import __version__
 from .storage import Storage, backend_origin
 from .codex import CodexAdapter, CodexRpc, CodexError
 
@@ -148,6 +149,7 @@ class BackendLink:
             def alive():
                 return (self.ws is ws and not ws.closed and
                     self.sessions.get(payload["sessionId"]) is session and session is not None and
+                    session["registration"].get("control", False) and
                     (session["registration"]["mode"] == "swarm" or
                      payload.get("senderId") == credential.get("ownerId")))
             if not session or not session["registration"].get("control") or not alive():
@@ -233,7 +235,7 @@ class Connector:
     async def dispatch(self, request):
         operation = request["operation"]
         if operation == "status":
-            return {"status": "running", "machine": self.storage.config,
+            return {"status": "running", "version": __version__, "machine": self.storage.config,
                     "backends": [{"backend": origin, "state": link.state,
                                   "sessions": list(link.sessions.values())}
                                  for origin, link in self.links.items()]}
@@ -287,9 +289,9 @@ class Connector:
                     except (ValueError, CodexError) as error:
                         raise BackendError(str(error) if isinstance(error, CodexError) else "invalid_codex_thread_id") from None
                 if existing:
-                    if control:
-                        existing["registration"]["control"] = True
-                        existing["codex_socket"] = socket
+                    if "control" in request:
+                        existing["registration"]["control"] = control
+                        existing["codex_socket"] = socket if control else None
                     if request.get("name_explicit"):
                         existing["registration"]["name"] = request["name"]
                     if request.get("mode_explicit"):
