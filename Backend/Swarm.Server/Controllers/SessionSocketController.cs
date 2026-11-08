@@ -82,13 +82,21 @@ public sealed class SessionSocketController(PairingService pairing, SessionRegis
                                 !PairingController.Valid(registration.ProjectId, 100) ||
                                 !PairingController.Valid(registration.Harness, 40) ||
                                 registration.Mode is not ("solo" or "swarm")) throw new JsonException("Invalid session");
-                            await Send(new { id = requestId, type = "session.registered",
-                                payload = registry.Register(connectionId, identity, registration) });
+                            await Send(new
+                            {
+                                id = requestId,
+                                type = "session.registered",
+                                payload = registry.Register(connectionId, identity, registration)
+                            });
                             break;
                         case "session.unregister":
                             Guid sessionId = message.GetProperty("payload").GetProperty("sessionId").GetGuid();
-                            await Send(new { id = requestId, type = "session.unregistered",
-                                removed = registry.Remove(connectionId, sessionId) });
+                            await Send(new
+                            {
+                                id = requestId,
+                                type = "session.unregistered",
+                                removed = registry.Remove(connectionId, sessionId)
+                            });
                             break;
                         case "session.list":
                             await Send(new { id = requestId, type = "session.listed", payload = registry.List(identity.OwnerId) });

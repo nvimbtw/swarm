@@ -7,7 +7,8 @@ import unittest
 from unittest.mock import patch
 import uuid
 
-from swarm_client.codex import CodexAdapter, CodexError, CodexRpc
+from swarm_client.codex import CodexAdapter
+from swarm_client.codex_rpc import CodexError, CodexRpc
 from fixtures.codex_daemon import CodexDaemon
 
 
@@ -80,7 +81,7 @@ class CodexTests(unittest.IsolatedAsyncioTestCase):
                 await self.adapter.submit(self.session, self.request(**kwargs), self.emit)
         with self.assertRaisesRegex(CodexError, "workspace_mismatch"):
             await self.adapter.attach({**self.session, "workspace": "/another/workspace"})
-        await self.adapter.submit(self.session, self.request(), self.emit, alive=lambda: False)
+        await self.adapter.submit(self.session, self.request(), self.emit, is_current=lambda: False)
         await self.wait_events("failed")
         self.assertFalse(any(c["method"] == "thread/queue/add" for c in self.calls()))
 
@@ -133,3 +134,17 @@ class CodexTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(CodexError, "check_daemon_socket"):
             await rpc.connect()
         self.assertIsNone(rpc.http)
+
+    async def test_requests_for_the_same_thread_run_in_fifo_order(self):
+        (self.root / "busy").touch()
+        await self.adapter.submit(self.session, self.request(prompt="first"), self.emit)
+        await self.adapter.submit(dict(self.session), self.request(prompt="second"), self.emit)
+        (self.root / "busy").unlink()
+        for _ in range(100):
+            if len([event for event in self.events if event["status"] == "completed"]) == 2:
+                break
+            await asyncio.sleep(0.02)
+        completed = [event["output"] for event in self.events if event["status"] == "completed"]
+        self.assertEqual(len(completed), 2, self.events)
+        self.assertTrue(completed[0].endswith("first"), completed)
+        self.assertTrue(completed[1].endswith("second"), completed)

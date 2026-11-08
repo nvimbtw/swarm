@@ -1,8 +1,10 @@
-# Local Swarm connector
+# Swarm connector
 
-One Python service per OS user serves multiple coding sessions and workspaces. Each authenticated backend origin has one outbound WebSocket carrying separate session registrations. The initial local transport is a user-only Unix socket (Linux/macOS). Native Codex CLI sessions can receive Discord prompts and return results through that same connection. Windows support, MCP tools, and automatic harness lifecycle detection are not implemented.
+One local service connects multiple harness sessions to the backend through one authenticated WebSocket per backend origin. Discord `/agent` routes prompts through that connection to existing Codex daemon sessions and returns their results to the originating channel.
 
-## Setup and first connection
+The connector runs on Linux/macOS. MCP, other harness adapters, Windows support, and automatic conversation-close detection are not implemented.
+
+## Install and pair
 
 From the repository root:
 
@@ -12,7 +14,7 @@ Client/.venv/bin/python -m pip install -e Client
 Client/.venv/bin/swarm serve
 ```
 
-Leave that shell running. Start the backend separately from `Backend/Swarm.Server` using `dotnet run`; it needs `DISCORD_TOKEN` in the environment or the existing `.env` setup. Invite the Discord application with the `bot` and `applications.commands` scopes. View Channels and Send Messages are sufficient for the current slash-command test; channel and application-command permissions must allow the user to invoke commands.
+Keep the service running. Start the backend separately with `dotnet run` from `Backend/Swarm.Server`; it reads `DISCORD_TOKEN` from the environment or the nearest `.env`. Invite the Discord application with `bot` and `applications.commands` scopes, and allow View Channels, Send Messages, and application commands in the target channel.
 
 In another shell:
 
@@ -20,136 +22,104 @@ In another shell:
 Client/.venv/bin/swarm pair-start --backend http://localhost:5142
 ```
 
-Run the returned `/swarm-pair pairing-id:...` command in Discord. The bot privately returns an eight-digit code. Complete pairing locally (the command prompts for the code):
+Run the returned `/swarm-pair pairing-id:…` command in Discord, then enter its private eight-digit code locally:
 
 ```bash
 Client/.venv/bin/swarm pair-complete --backend http://localhost:5142
-Client/.venv/bin/swarm connect --backend http://localhost:5142 --project swarm --name backend-codex --harness codex --workspace "$PWD"
-Client/.venv/bin/swarm status
-Client/.venv/bin/swarm sessions
 ```
 
-`connect` stores preferences in the workspace's `.swarm/config.json`. For a second harness, connect with another name and its workspace. A real `--harness-session-id`, when available, makes reconnecting that same harness idempotent. Native Codex defaults to verified delivery and uses the current `CODEX_THREAD_ID` when available; other harnesses or explicit `--registration-only` can register metadata. Retain the returned Swarm ID to disconnect it later.
+Pairing expires after five minutes and allows five incorrect attempts. Remote backend origins require HTTPS; HTTP is accepted only for loopback addresses.
 
-For the full CLI contract and states, see [the skill command reference](../skills/swarm-connect/references/commands.md). Use `swarm disconnect --session <id>` to remove one registration. Stop the service with Ctrl+C only when all attached sessions should go offline. Service restarts lose attached sessions, but keep credentials.
+## Connect an existing Codex conversation
 
-`swarm status` reports the running connector version. Updating files or invoking the skill again does not reload an already running Python process. After a connector update, restart that service and reattach its sessions, preserving any active work. A successful `connect` includes `delivery.ready`; metadata-only registrations are intentionally excluded from Discord's session picker.
-
-## Discord → native Codex CLI
-
-Use a Codex daemon exposing its Unix WebSocket control socket, `thread/queue/*`, and `thread/settings/update` (the implementation was checked against the 0.166.0 protocol schema). The target conversation must live on the existing local app-server daemon. Swarm attaches to that daemon; it does not start a second conversation or resume the same history in a separate Codex process. IDE extensions and T3-managed Codex sessions need separate adapters.
-
-Pair as above, then connect the **actual existing Codex thread UUID**, from the current native CLI session:
-
-```bash
-swarm connect --backend http://localhost:5142 --project swarm \
-  --name backend-codex --harness codex --workspace /absolute/project \
-  --harness-session-id <actual-codex-thread-uuid> --control --mode solo
-```
-
-Codex connections enable control by default (`--control` is an explicit alias). The CLI uses the current `CODEX_THREAD_ID` if no explicit thread ID is supplied. It verifies that the thread is already live on that daemon, accepts direct input, matches the workspace, and exposes its queue API before advertising Discord delivery. The connector performs the WebSocket Upgrade handshake over `$CODEX_HOME/app-server-control/app-server-control.sock` (defaulting to `~/.codex`). A custom daemon can be selected with `--codex-socket /absolute/control.sock`; this stays local. `codex app-server proxy` is a raw byte proxy and is not treated as a JSONL app-server transport. Use `--registration-only` explicitly to register metadata without Discord delivery. Other harnesses default to metadata. A failed Codex control check returns an error; it never silently falls back to metadata. Reconnect an existing metadata registration with `--control` to enable delivery. Do not use a T3 thread ID or infer a Codex thread from a workspace/name.
-
-In Discord:
-
-```text
-/agent session:<select connected session> prompt:Run the tests
-/agent session:<select connected session> prompt:Investigate the failure model:<model> reasoning:<level>
-/agent session:<select connected session> prompt:Focus on the login failure delivery:Inject
-```
-
-Session autocomplete includes the name, harness, machine, and project and only shows controllable sessions the caller may use. Model and reasoning autocomplete query the selected machine through the shared backend WebSocket. Values are checked again locally. These are the daemon's advertised capabilities, not a guarantee of account entitlement; inference can still fail. Prompts are limited to 4,000 characters. Omitted settings inherit the session's configuration. Explicit model/reasoning changes take effect when the queued request starts and remain the session settings for subsequent turns, matching Codex's API semantics.
-
-Queue is the default. Requests wait in a bounded FIFO (20 waiting requests per native thread) on the connector until current work and native queued input finish. Swarm then uses Codex's persistent queue plus its atomic start-if-idle operation; a race with local input cannot turn a queued prompt into steering. `Inject` requires an active turn and uses its expected turn ID; it never interrupts work or silently starts another turn. Injection rejects model/reasoning overrides.
-
-The command privately acknowledges `queued` or `injected` with a request UUID. Queue acknowledgment means the local connector accepted it, not that Codex has started. Completion, failure, interruption, or uncertain delivery is posted in the originating Discord channel. Only agent message text from the relevant turn is returned; no transcript, reasoning, tool arguments, or approval payloads are relayed. Injected requests receive output completed after injection and share the active turn's result. Keep the local CLI open for approvals and questions; Discord approval buttons and interactive question forwarding are outside this version. Output is bounded to 16,000 characters and split into Discord-sized messages; oversized escaped WebSocket output is truncated further. Mentions are disabled.
-
-Queued requests are held in memory until submitted to Codex; connector restarts discard them. A disconnect cancels work still waiting locally. Work already accepted by Codex can continue, and native queue entries remain in Codex. After an ambiguous acknowledgment or connection loss, check local Codex before resending: Swarm never automatically replays prompts or cancels an active turn. Results from a disconnected transport are not replayed on reconnect. Backend request tracking expires after 24 hours and resets on restart.
-
-## State and authentication
-
-- `~/.swarm/config.json`: machine UUID and display name.
-- `~/.swarm/credentials.json`: backend-origin-specific bearer credentials, owner-readable/writable only. Credentials do not appear in CLI output.
-- `~/.swarm/connector.sock` and `connector.lock`: private local communication and single-instance ownership.
-- `<workspace>/.swarm/config.json`: backend origin, project label, session-name prefix, mode; no credentials or live session IDs. Ignored by this repository's Git configuration. Add `.swarm/` to other projects' ignore rules too.
-
-Project settings store an explicit backend origin in this first version instead of named profiles. Credentials are always looked up by that origin; changing a project URL does not transfer credentials. `--home` or `SWARM_HOME` isolates a connector installation for testing.
-
-Pairing requires a private connector secret plus an eight-digit code issued to the Discord interaction's authenticated user. Challenges expire after five minutes, are single-use, and allow five incorrect code attempts. The backend hashes credentials in memory. Pairing HTTP endpoints are rate-limited per source IP. Re-pairing the same installation/account replaces its previous credential. Backend restarts invalidate all credentials until database support is added; the connector reports `pairing_required` when a reconnect receives HTTP 401.
-
-HTTP is accepted only for loopback backend addresses. A Raspberry Pi accessed over the network needs an HTTPS endpoint with a trusted certificate; the connector uses the corresponding secure WebSocket automatically. Redirects on pairing requests are refused. Workspace paths and harness thread identifiers remain local; only session ID, name, project label, harness type, and mode are registered remotely.
-
-Discord delivery enforces session mode: `solo` accepts only the paired Discord owner; `swarm` accepts any Discord user able to invoke the bot. There is no project-membership or guild scoping yet, so Swarm mode is an explicit opt-in to sharing across the bot's users. Agent-to-agent MCP access is not implemented. Metadata-only registrations cannot receive prompts. Sessions remain attached until explicitly disconnected or the service stops.
-
-## Codex skill registration
-
-The canonical source is [skills/swarm-connect/SKILL.md](../skills/swarm-connect/SKILL.md). Register it for this user without copying the source:
+Register the [connection skill](../skills/swarm-connect/SKILL.md) once for this OS user:
 
 ```bash
 mkdir -p ~/.agents/skills
 ln -s /absolute/path/to/Swarm/skills/swarm-connect ~/.agents/skills/swarm-connect
 ```
 
-Do not replace an existing skill with that name blindly. Codex supports symlinked skill folders; invoke `$swarm-connect`. If discovery has not refreshed, restart Codex. See [official skill discovery guidance](https://learn.chatgpt.com/docs/build-skills#where-codex-loads-local-skills).
+Check an existing destination before creating the symlink. In native Codex CLI, invoke `$swarm-connect` or select it under `/skills`. The link keeps the skill current with this checkout. See [Codex skill discovery](https://learn.chatgpt.com/docs/build-skills#where-codex-loads-local-skills).
 
-## Protocol v1
+The manual equivalent is:
 
-The existing unauthenticated `/ws` greeting demo remains available. The connector uses `/ws/sessions`, authenticated with `Authorization: Bearer <credential>`. It is included in the existing connection diagnostics.
-
-Pairing uses `POST /api/pairing/start` with `machineId`/`machineName`, followed by `POST /api/pairing/complete` with `pairingId`/`secret`/`code`. Discord approval happens exclusively through `/swarm-pair`, not a production HTTP approval endpoint.
-
-The WebSocket starts with `{"type":"hello","version":1,"ownerId":"..."}`. Requests use a version, correlation ID, type, and payload:
-
-```json
-{
-  "version": 1,
-  "id": "request-uuid",
-  "type": "session.register",
-  "payload": {
-    "sessionId": "session-uuid",
-    "name": "backend-codex",
-    "projectId": "swarm",
-    "harness": "codex",
-    "mode": "solo",
-    "control": true
-  }
-}
+```bash
+swarm connect --backend http://localhost:5142 --project swarm \
+  --name backend-codex --harness codex --workspace /absolute/project \
+  --harness-session-id <actual-codex-thread-uuid> --mode solo
 ```
 
-Supported requests: `session.register`, `session.unregister` (`sessionId` payload), `session.list`, and `ping`. Replies have the same correlation ID and types `session.registered`, `session.unregistered`, `session.listed`, `pong`, or `error`. Lists are owner-scoped, and unregistering requires the owning connection. The same authenticated installation can rebind its session IDs on reconnect, even before the old socket finishes cleanup. Identity is derived from the bearer credential, not request fields. Messages are limited to 64 KiB of JSON text, including across fragments. There is a 100-session cap per installation identity. Disconnection removes that connection's registrations.
+Use the installed `Client/.venv/bin/swarm` path if `swarm` is not on `PATH`. When invoked inside the existing conversation, `connect` can use its `CODEX_THREAD_ID` environment variable instead of the explicit ID. Never infer a thread ID from a directory or display name.
 
-The connector retries transport failures with jittered exponential backoff (up to approximately 31 seconds). It re-registers live local attachments, not previous process state. Registrations are restored, but work requests and results are never replayed.
+Codex control is enabled by default. The connector verifies that the thread is already live on the selected daemon, accepts direct input, matches the workspace, and supports the native queue API. It does not launch or transfer a conversation. An unavailable control interface returns an error; metadata-only registration requires explicit `--registration-only`. Other harness types default to metadata.
 
-### Addressed harness messages on the same socket
+The daemon must expose its Unix WebSocket control socket and `thread/queue/*` and `thread/settings/update` APIs. The default socket is `$CODEX_HOME/app-server-control/app-server-control.sock` (`CODEX_HOME` defaults to `~/.codex`); use `--codex-socket /absolute/control.sock` for a custom daemon. T3-managed conversations require a separate adapter.
 
-There is no extra backend-to-harness connection. The backend multiplexes control messages with registration and heartbeat messages:
+A usable connection returns both `status: registered` and `delivery.ready: true`. Reconnecting the same native thread/workspace/project reuses its Swarm session ID. `connect` saves backend, project, and mode preferences under the workspace's `.swarm/config.json`.
 
-```json
-{
-  "version": 1,
-  "id": "request-uuid",
-  "type": "agent.submit",
-  "payload": {
-    "requestId": "request-uuid",
-    "sessionId": "swarm-session-uuid",
-    "senderId": "verified-discord-user-id",
-    "channelId": "discord-channel-id",
-    "delivery": "queue",
-    "prompt": "Run the tests",
-    "model": null,
-    "reasoning": null
-  }
-}
+## Use from Discord
+
+```text
+/agent session:<select session> prompt:Run the tests
+/agent session:<select session> prompt:Investigate the failure model:<model> reasoning:<level>
+/agent session:<select session> prompt:Focus on login delivery:Inject
 ```
 
-`agent.describe` uses the same envelope and returns model/reasoning options without submitting input. The connector answers with `agent.reply`, retaining the envelope's correlation ID and `payload.requestId`/`sessionId`. Submit replies are `queued`, `injected`, `failed`, or `unknown`; descriptions return `available` plus `models`, `model`, and `reasoning`. Subsequent `agent.event` messages have their own envelope ID and the original request/session IDs in the payload, with status `started`, `completed`, `failed`, `interrupted`, or `unknown`, and optional `turnId`, `output`, and `error`.
+| Option | Behavior |
+| --- | --- |
+| `session` | Shows controllable sessions the caller may use, labelled by name, harness, machine, and project. |
+| `prompt` | Required; up to 4,000 characters. |
+| `model`, `reasoning` | Optional; choices come from that daemon. Explicit changes persist for subsequent Codex turns. |
+| `delivery` | Defaults to Queue. Inject steers the current active turn and rejects model/reasoning changes. |
 
-Sender identity comes exclusively from the authenticated Discord interaction. The backend authorizes again at submission, binds every reply/event to the selected session and authenticated installation socket, and retains the original Discord destination itself. Client-supplied destinations are never trusted for result publication. A swapped credential is checked before dispatch even on otherwise idle sockets. The local connector independently checks owner/mode and attachment before delivery. Concurrent sends are serialized on each transport; incoming harness operations run separately so waiting for Codex never blocks registration/heartbeat replies. The router caps outstanding requests at 100 per connection and 1,000 globally; duplicate request IDs on a live connection reuse the original acknowledgment instead of resubmitting input.
+Solo permits only the paired Discord owner. Swarm permits any Discord user able to invoke the bot; there is no project-membership or guild scoping yet. Choose Swarm only when that sharing is intended.
 
-## Verification
+`queued` means the local connector accepted the request, not that Codex has started. Requests wait for current work and native queued input to finish. Completion, failure, interruption, or uncertain delivery is posted to the originating channel with the request UUID. Injected requests share the active turn's result and receive output completed after injection.
+
+Only agent message text is relayed. Approvals and questions stay in the local Codex UI. Output is bounded to 16,000 characters, may shrink further to fit the wire limit, and is split into Discord-sized messages with mentions disabled. Model catalogs describe capabilities; they do not guarantee account entitlement.
+
+## Operate and troubleshoot
+
+```bash
+swarm status
+swarm sessions --backend http://localhost:5142
+swarm disconnect --backend http://localhost:5142 --session <swarm-session-id>
+```
+
+`status` reads local state and the running connector version; `sessions` queries the backend for this owner's registrations. Disconnect the intended registration explicitly. Stop the shared service only when all its sessions should go offline.
+
+| Symptom | Check or action |
+| --- | --- |
+| Empty Discord session picker | Check `registration.control` and `delivery.ready`. Metadata-only sessions are hidden. Solo also requires the paired Discord account. |
+| `pairing_required` | Pair again. Backend credentials are held in memory and are lost on backend restart. |
+| `codex_session_not_loaded_on_daemon` | Connect the actual live conversation on the correct daemon; do not resume its history in another process. |
+| `codex_unavailable_check_daemon_socket` | Check the daemon and its socket path. The control socket requires a WebSocket handshake. |
+| Updated code seems unchanged | Check the running version. Restart the connector and reattach its sessions when no active work will be disturbed; editing files does not reload Python. |
+| `unknown` delivery or connection lost | Check local Codex before resending. Accepted work may still be running. |
+
+Reconnect restores live registrations after transport loss, with backoff up to approximately 31 seconds. Prompts and results are never replayed automatically. A disconnect cancels requests still waiting locally; work already accepted by Codex can continue. Connector restarts discard local attachments and waiting requests but retain credentials. Backend request tracking lasts up to 24 hours and is lost on restart.
+
+## Local state
+
+| Location | Contents |
+| --- | --- |
+| `~/.swarm/config.json` | Machine UUID and display name. |
+| `~/.swarm/credentials.json` | Private bearer credentials, keyed by backend origin. Never copy them between origins. |
+| `~/.swarm/connector.sock`, `connector.lock` | User-only CLI transport and single-instance lock. |
+| `<workspace>/.swarm/config.json` | Project preferences; no credentials or live thread IDs. Add `.swarm/` to the project's ignore rules. |
+
+`--home /path` or `SWARM_HOME` isolates an installation; use the same value for the service and its CLI commands. Workspace paths, native thread IDs, and daemon socket paths stay local. The backend receives session metadata and delivery capability.
+
+## Development
+
+- [Protocol and delivery rules](docs/protocol.md): wire messages, trust boundaries, queue ownership, and limits.
+- [Skill command reference](../skills/swarm-connect/references/commands.md): arguments and result states for agent callers.
 
 ```bash
 dotnet run --project Backend/Swarm.Server.Tests
 Client/.venv/bin/python -m unittest discover -s Client/tests -v
 ```
 
-The C# executable checks pairing expiry, single-use codes, attempt limits, identity binding, credential replacement, and registration ownership. With `--serve` it is a separate loopback-only fixture host used by Python integration tests; its simulated Discord approval endpoint is absent from the production backend. The Python tests exercise actual ASP.NET HTTP/WebSocket controllers, the local service, and a real Unix-socket WebSocket fixture implementing deterministic Codex replies without a Discord token or inference API call. They cover mode permissions, two controllable sessions sharing one socket, queue/inject behavior, correlated results, disconnect cancellation, literal prompt preservation, unsupported options, and atomic-start races. The transport was also checked against a live Codex 0.167.0 daemon for handshake, thread attachment, native queue availability, and model listing. Real inference, local approval routing, and Discord result publication still require a live user smoke test.
+The tests exercise the real ASP.NET controllers and shared connector using a Unix-socket WebSocket Codex fixture, without Discord credentials or inference calls. They cover ownership, multiplexing, queue/inject races, duplicate requests, reconnect, cancellation, and correlated results. The fixture's simulated Discord approval endpoint is absent from production.
+
+Live transport checks used Codex daemon 0.167.0. Discord-to-Codex prompting was also confirmed manually. Real account access and local approval interaction still depend on the user's Codex configuration.

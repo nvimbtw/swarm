@@ -14,7 +14,7 @@ import aiohttp
 
 from swarm_client.cli import rpc
 from swarm_client.storage import backend_origin
-from swarm_client.service import BackendLink
+from swarm_client.backend import BackendLink
 from fixtures.codex_daemon import CodexDaemon
 
 
