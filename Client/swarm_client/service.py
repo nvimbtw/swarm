@@ -3,120 +3,17 @@ import contextlib
 import fcntl
 import json
 from pathlib import Path
-import random
 import signal
 import uuid
 
 import aiohttp
 
+from . import __version__
+from .backend import BackendError, BackendLink
+from .codex import CodexAdapter
+from .codex_rpc import CodexError, CodexRpc
+from .protocol import MAX_MESSAGE_BYTES, MAX_SESSIONS
 from .storage import Storage, backend_origin
-
-
-class BackendError(RuntimeError):
-    pass
-
-
-class BackendLink:
-    def __init__(self, service, origin):
-        self.service, self.origin = service, origin
-        self.state = "connecting"
-        self.sessions = {}
-        self.pending = {}
-        self.ws = None
-        self.lock = asyncio.Lock()
-        self.task = asyncio.create_task(self.run())
-
-    async def run(self):
-        delay = 1
-        try:
-            while True:
-                credential = self.service.storage.credentials.get(self.origin)
-                if not credential:
-                    self.state = "pairing_required"
-                    return
-                try:
-                    async with self.service.http.ws_connect(
-                        self.origin + "/ws/sessions",
-                        headers={"Authorization": "Bearer " + credential["token"]},
-                        heartbeat=20, max_msg_size=64 * 1024,
-                    ) as ws:
-                        self.ws = ws
-                        hello = await asyncio.wait_for(ws.receive_json(), 10)
-                        if hello.get("type") != "hello" or hello.get("version") != 1:
-                            raise BackendError("unsupported_protocol")
-                        self.state = "connected"
-                        delay = 1
-                        reader = asyncio.create_task(self.receive(ws))
-                        try:
-                            async with self.lock:
-                                for session in list(self.sessions.values()):
-                                    await self.register(session)
-                            await reader
-                        finally:
-                            reader.cancel()
-                            await asyncio.gather(reader, return_exceptions=True)
-                except aiohttp.WSServerHandshakeError as error:
-                    if error.status == 401:
-                        self.state = "pairing_required"
-                        self.service.storage.credentials.pop(self.origin, None)
-                        self.service.storage.save_credentials()
-                        return
-                    self.state = "disconnected"
-                except (aiohttp.ClientError, OSError, TimeoutError, BackendError, ValueError):
-                    self.state = "disconnected"
-                finally:
-                    self.ws = None
-                    if self.state != "pairing_required":
-                        self.state = "disconnected"
-                    for future in self.pending.values():
-                        if not future.done():
-                            future.set_exception(BackendError("connection_lost"))
-                    self.pending.clear()
-                    for session in self.sessions.values():
-                        if session["state"] != "rejected":
-                            session["state"] = "pending"
-                await asyncio.sleep(delay + random.random())
-                delay = min(delay * 2, 30)
-        finally:
-            if self.state != "pairing_required":
-                self.state = "disconnected"
-
-    async def receive(self, ws):
-        async for message in ws:
-            if message.type != aiohttp.WSMsgType.TEXT:
-                break
-            result = json.loads(message.data)
-            future = self.pending.get(result.get("id"))
-            if future and not future.done():
-                future.set_result(result)
-
-    async def request(self, kind, payload=None):
-        if self.ws is None or self.ws.closed:
-            raise BackendError("backend_unavailable")
-        request_id = str(uuid.uuid4())
-        future = asyncio.get_running_loop().create_future()
-        self.pending[request_id] = future
-        try:
-            await self.ws.send_json({"version": 1, "id": request_id, "type": kind, "payload": payload})
-            result = await asyncio.wait_for(future, 10)
-            if result.get("type") == "error":
-                raise BackendError(result.get("error", "backend_error"))
-            return result
-        finally:
-            self.pending.pop(request_id, None)
-
-    async def register(self, session):
-        try:
-            await self.request("session.register", session["registration"])
-            session["state"] = "registered"
-        except BackendError as error:
-            session["state"] = "rejected" if str(error) == "invalid_request" else "pending"
-            if session["state"] == "pending":
-                raise
-
-    async def close(self):
-        self.task.cancel()
-        await asyncio.gather(self.task, return_exceptions=True)
 
 
 class Connector:
@@ -124,6 +21,7 @@ class Connector:
         self.storage, self.http = storage, http
         self.links = {}
         self.pairings = {}
+        self.adapters = {}
 
     async def post(self, origin, path, payload):
         async with self.http.post(origin + path, json=payload, allow_redirects=False) as response:
@@ -134,7 +32,7 @@ class Connector:
     async def dispatch(self, request):
         operation = request["operation"]
         if operation == "status":
-            return {"status": "running", "machine": self.storage.config,
+            return {"status": "running", "version": __version__, "machine": self.storage.config,
                     "backends": [{"backend": origin, "state": link.state,
                                   "sessions": list(link.sessions.values())}
                                  for origin, link in self.links.items()]}
@@ -169,42 +67,7 @@ class Connector:
             return {"status": "pairing_required", "backend": origin}
         link = self.get_link(origin)
         if operation == "connect":
-            async with link.lock:
-                harness_id = request.get("harness_session_id")
-                existing = next((s for s in link.sessions.values() if harness_id and
-                                 s.get("harness_session_id") == harness_id and
-                                 s["workspace"] == request["workspace"] and
-                                 s["registration"]["harness"] == request["harness"] and
-                                 s["registration"]["projectId"] == request["project"]), None)
-                if existing:
-                    if request.get("name_explicit"):
-                        existing["registration"]["name"] = request["name"]
-                    if request.get("mode_explicit"):
-                        existing["registration"]["mode"] = request["mode"]
-                    if link.state == "connected":
-                        try:
-                            await link.register(existing)
-                        except (BackendError, TimeoutError, aiohttp.ClientError):
-                            existing["state"] = "pending"
-                            if link.ws:
-                                await link.ws.close()
-                    return {"status": existing["state"], "session": existing}
-                if len(link.sessions) >= 100:
-                    raise BackendError("session_limit")
-                session_id = str(uuid.uuid4())
-                session = {"registration": {"sessionId": session_id, "name": request["name"],
-                           "projectId": request["project"], "harness": request["harness"], "mode": request["mode"]},
-                           "workspace": request["workspace"], "harness_session_id": harness_id,
-                           "state": "pending"}
-                link.sessions[session_id] = session
-                if link.state == "connected":
-                    try:
-                        await link.register(session)
-                    except (BackendError, TimeoutError, aiohttp.ClientError):
-                        session["state"] = "pending"
-                        if link.ws:
-                            await link.ws.close()
-                return {"status": session["state"], "session": session}
+            return await self.connect_session(link, request)
         if operation == "disconnect":
             async with link.lock:
                 session = link.sessions.pop(request["session_id"], None)
@@ -219,6 +82,61 @@ class Connector:
         if operation == "sessions":
             return await link.request("session.list")
         raise ValueError("Unknown operation")
+
+    async def connect_session(self, link, request):
+        async with link.lock:
+            harness_id = request.get("harness_session_id")
+            existing = next((s for s in link.sessions.values() if harness_id and
+                             s.get("harness_session_id") == harness_id and
+                             s["workspace"] == request["workspace"] and
+                             s["registration"]["harness"] == request["harness"] and
+                             s["registration"]["projectId"] == request["project"]), None)
+            control = bool(request.get("control"))
+            socket = request.get("codex_socket")
+            if control:
+                if request["harness"] != "codex" or not harness_id:
+                    raise BackendError("codex_control_requires_thread_id")
+                try:
+                    uuid.UUID(harness_id)
+                    adapter = self.adapters.setdefault(socket, CodexAdapter(CodexRpc(socket)))
+                    await adapter.attach({"harness_session_id": harness_id, "workspace": request["workspace"]})
+                except (ValueError, CodexError) as error:
+                    raise BackendError(str(error) if isinstance(error, CodexError) else "invalid_codex_thread_id") from None
+            if existing:
+                if "control" in request:
+                    existing["registration"]["control"] = control
+                    existing["codex_socket"] = socket if control else None
+                if request.get("name_explicit"):
+                    existing["registration"]["name"] = request["name"]
+                if request.get("mode_explicit"):
+                    existing["registration"]["mode"] = request["mode"]
+                await self.register_when_connected(link, existing)
+                return {"status": existing["state"], "session": existing}
+            if len(link.sessions) >= MAX_SESSIONS:
+                raise BackendError("session_limit")
+            session_id = str(uuid.uuid4())
+            session = {
+                "registration": {
+                    "sessionId": session_id, "name": request["name"], "projectId": request["project"],
+                    "harness": request["harness"], "mode": request["mode"], "control": control,
+                },
+                "workspace": request["workspace"], "harness_session_id": harness_id,
+                "codex_socket": socket, "state": "pending",
+            }
+            link.sessions[session_id] = session
+            await self.register_when_connected(link, session)
+            return {"status": session["state"], "session": session}
+
+    @staticmethod
+    async def register_when_connected(link, session):
+        if link.state != "connected":
+            return
+        try:
+            await link.register(session)
+        except (BackendError, TimeoutError, aiohttp.ClientError):
+            session["state"] = "pending"
+            if link.ws:
+                await link.ws.close()
 
     def get_link(self, origin):
         if origin not in self.links:
@@ -261,7 +179,7 @@ async def serve(home):
         storage.socket.unlink(missing_ok=True)
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as http:
             connector = Connector(storage, http)
-            server = await asyncio.start_unix_server(connector.handle, path=storage.socket, limit=64 * 1024)
+            server = await asyncio.start_unix_server(connector.handle, path=storage.socket, limit=MAX_MESSAGE_BYTES)
             storage.socket.chmod(0o600)
             stopped = asyncio.Event()
             loop = asyncio.get_running_loop()
@@ -273,4 +191,5 @@ async def serve(home):
                     await stopped.wait()
             finally:
                 await asyncio.gather(*(link.close() for link in connector.links.values()))
+                await asyncio.gather(*(adapter.close() for adapter in connector.adapters.values()))
                 storage.socket.unlink(missing_ok=True)

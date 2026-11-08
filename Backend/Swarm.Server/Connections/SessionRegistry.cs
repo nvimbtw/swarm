@@ -19,7 +19,7 @@ public sealed class SessionRegistry
                     x.Identity.MachineId == identity.MachineId) >= 100)
                 throw new InvalidOperationException("Session limit reached.");
             var session = new RegisteredSession(request.SessionId, connectionId, identity,
-                request.Name, request.ProjectId, request.Harness, request.Mode, DateTimeOffset.UtcNow);
+                request.Name, request.ProjectId, request.Harness, request.Mode, DateTimeOffset.UtcNow, request.Control);
             _sessions[request.SessionId] = session;
             return session;
         }
@@ -39,12 +39,27 @@ public sealed class SessionRegistry
                 _sessions.Remove(id);
     }
 
+    public static bool CanUse(RegisteredSession session, string userId) =>
+        session.Control && session.Harness == "codex" &&
+        (session.Identity.OwnerId == userId || session.Mode == "swarm");
+
+    public RegisteredSession? FindAvailable(string userId, Guid sessionId)
+    {
+        lock (_gate) return _sessions.TryGetValue(sessionId, out var session) && CanUse(session, userId)
+            ? session : null;
+    }
+
+    public RegisteredSession[] Available(string userId)
+    {
+        lock (_gate) return _sessions.Values.Where(x => CanUse(x, userId)).ToArray();
+    }
+
     public RegisteredSession[] List(string ownerId)
     {
         lock (_gate) return _sessions.Values.Where(x => x.Identity.OwnerId == ownerId).ToArray();
     }
 }
 
-public sealed record SessionRegistration(Guid SessionId, string Name, string ProjectId, string Harness, string Mode);
+public sealed record SessionRegistration(Guid SessionId, string Name, string ProjectId, string Harness, string Mode, bool Control = false);
 public sealed record RegisteredSession(Guid SessionId, Guid ConnectionId, InstallationIdentity Identity,
-    string Name, string ProjectId, string Harness, string Mode, DateTimeOffset ConnectedAt);
+    string Name, string ProjectId, string Harness, string Mode, DateTimeOffset ConnectedAt, bool Control = false);

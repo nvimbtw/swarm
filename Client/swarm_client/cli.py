@@ -51,9 +51,14 @@ async def execute(args, parser):
         for value, limit in ((name, 80), (project, 100), (harness, 40)):
             if not value.strip() or len(value) > limit or any(ord(c) < 32 for c in value):
                 raise ValueError("Invalid session name, project, or harness.")
+        harness_id = args.harness_session_id
+        if not harness_id and harness == "codex":
+            harness_id = os.environ.get("CODEX_THREAD_ID")
+        control = args.control if args.control is not None else harness == "codex"
         request.update(workspace=str(workspace), project=project, name=name, harness=harness,
-                       mode=mode, harness_session_id=args.harness_session_id,
-                       name_explicit=args.name is not None, mode_explicit=args.mode is not None)
+                       mode=mode, harness_session_id=harness_id,
+                       name_explicit=args.name is not None, mode_explicit=args.mode is not None,
+                       control=control, codex_socket=args.codex_socket)
     if args.command == "disconnect":
         request["session_id"] = args.session
     result = await rpc(home, request)
@@ -74,6 +79,12 @@ async def execute(args, parser):
             session = next((s for s in link["sessions"] if s["registration"]["sessionId"] == session_id), None) if link else None
             if session:
                 result = {"status": session["state"], "session": session}
+    if args.command == "connect" and "session" in result:
+        controlled = result["session"]["registration"].get("control", False)
+        result["delivery"] = {"ready": controlled and result["status"] == "registered",
+            "state": "enabled" if controlled else "registration_only"}
+        if not controlled:
+            result["delivery"]["hint"] = "This session cannot appear in Discord /agent. Reconnect with Codex control enabled."
     return result
 
 
@@ -94,6 +105,12 @@ def main():
             sub.add_argument("--name")
             sub.add_argument("--harness", required=True)
             sub.add_argument("--harness-session-id")
+            delivery = sub.add_mutually_exclusive_group()
+            delivery.add_argument("--control", dest="control", action="store_true", default=None,
+                                  help="Verify and enable Discord delivery (default for Codex)")
+            delivery.add_argument("--registration-only", dest="control", action="store_false",
+                                  help="Explicitly register metadata without Discord delivery")
+            sub.add_argument("--codex-socket", help="Optional absolute path to the existing Codex daemon control socket")
             sub.add_argument("--mode", choices=["solo", "swarm"])
         if command == "disconnect":
             sub.add_argument("--session", required=True)

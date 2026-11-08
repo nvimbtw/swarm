@@ -1,27 +1,36 @@
-# Connector commands
+# Connector command reference
 
-All commands return JSON except interactive input and `serve`, which runs until stopped. A nonzero exit status can mean `pairing_required` or `pending`; inspect the JSON before deciding that a command failed.
+Commands return JSON; inspect it even when the exit code is nonzero. `serve` runs until stopped. Invoke `swarm --home /path …` or set `SWARM_HOME` consistently to isolate an installation; the default is `~/.swarm`.
 
-```bash
-swarm serve
-swarm status
-swarm connect --backend http://localhost:5142 --project swarm --name backend-codex --harness codex --workspace /absolute/project
-swarm pair-start --backend http://localhost:5142
-swarm pair-complete --backend http://localhost:5142 --code-stdin
-swarm sessions --backend http://localhost:5142
-swarm disconnect --backend http://localhost:5142 --session <swarm-session-id>
-```
+If `swarm` is unavailable, resolve this skill's source path to the Swarm checkout. From that checkout, create `Client/.venv` with `python3 -m venv Client/.venv`, install with `Client/.venv/bin/python -m pip install -e Client`, and use `Client/.venv/bin/swarm`. Do not assume the user's current workspace is the Swarm repository.
 
-Feed the eight-digit pairing code through stdin, not a command-line flag. `pair-start` returns the exact `/swarm-pair pairing-id:...` command. The user runs it in Discord and receives a private code. Pairing challenges expire after five minutes and allow five incorrect code attempts.
+| Command | Arguments and result |
+| --- | --- |
+| `serve` | Starts the shared local service. It must outlive the CLI call; use a persistent process mechanism or separate shell. |
+| `status` | Returns running version, machine identity, backend links, and local attachments. No backend argument. |
+| `pair-start` | `--backend <origin>`. Returns the exact `/swarm-pair` command to run in Discord. |
+| `pair-complete` | `--backend <origin> --code-stdin`. Feed the eight-digit Discord code through stdin, never a command-line argument. |
+| `connect` | `--harness codex --workspace <absolute-path> --backend <origin> --project <label>`, with optional `--name`, `--mode solo\|swarm`, `--harness-session-id`, and `--codex-socket`. |
+| `sessions` | `--backend <origin>`. Queries backend registrations owned by the paired Discord account. |
+| `disconnect` | `--backend <origin> --session <swarm-session-id>`. Removes only that attachment. |
 
-`connect` saves backend, project, and mode in `<workspace>/.swarm/config.json`. Later commands can reuse these settings. Use `--workspace` when operating outside that directory. The project is currently a label; central project records do not exist yet. `--harness-session-id` is optional and enables reuse within the same workspace/project/harness; do not infer it from the workspace or display name. Without it, every `connect` creates a new registration.
+`connect` saves backend, project, and mode preferences in the workspace's `.swarm/config.json`. Later commands can reuse those settings; use `--workspace` when operating elsewhere. A project is currently a label, not an authorization boundary.
 
-One service can handle multiple backend origins, each authenticated separately. Use `swarm --home /path serve` and the same global `--home` argument on other commands to isolate state. The default is `~/.swarm`, overridable with `SWARM_HOME`.
+Codex defaults to verified Discord control (`--control` is an explicit alias). Use the current native thread UUID; the CLI reads `CODEX_THREAD_ID` when no explicit ID is supplied. Reconnecting the same native thread/workspace/project reuses its Swarm ID. Never infer an ID from names, use a T3 thread ID, or launch/transfer a conversation to make it controllable.
 
-If `swarm` is not installed, locate the Swarm checkout from the skill's resolved source path: this file lives under `<checkout>/skills/swarm-connect/references/`. Install with `python3 -m venv <checkout>/Client/.venv` and `<checkout>/Client/.venv/bin/python -m pip install -e <checkout>/Client`. Then use `<checkout>/Client/.venv/bin/swarm` explicitly. Do not assume the current project is the Swarm checkout.
+A control failure must be diagnosed, not silently downgraded. Explicit `--registration-only` is for metadata without Discord delivery and is the default for other harness types. Without a native ID, each metadata attachment is separate. A custom daemon uses `--codex-socket /absolute/control.sock`; otherwise the connector uses the Codex home directory's `app-server-control/app-server-control.sock`.
 
-The initial local transport uses a private Unix socket and supports Linux/macOS. The foreground service can be run in a separate shell or started using the user's preferred supervisor. It must outlive the short CLI call; a transient tool shell may terminate background children.
+| State | Interpretation |
+| --- | --- |
+| `registered` + `delivery.ready: true` | Backend acknowledgment and verified Discord control. |
+| `registered` + `delivery.state: registration_only` | Metadata only; hidden from `/agent`. |
+| `pending` | Waiting for backend registration. Do not report it as connected. |
+| `pairing_required` | Discord verification is needed. Pairing expires after five minutes with five incorrect attempts allowed. |
+| `rejected` | Backend refused registration. |
+| `authenticated` | Credential issuance succeeded; no session registration is implied. |
 
-States: `registered` means acknowledged by the backend; `pending` means queued locally while connecting; `pairing_required` requires Discord verification; `rejected` means the backend refused the session. `authenticated` confirms credential issuance, not session registration. `swarm status` is local state; `swarm sessions` queries backend registrations owned by this Discord user.
+Solo permits only the paired owner. Swarm permits other Discord users able to invoke the bot, without project/guild scoping. `/agent` queues by default; explicit Inject requires an active turn and rejects model/reasoning changes. Explicit settings persist in Codex, results return to the originating Discord channel, and approvals stay local.
 
-The service reconnects and registers attached sessions again after transport loss. Service restarts discard session registrations but retain credentials; reconnect each live conversation. Backend restarts invalidate credentials until persistence is implemented. Disconnect explicitly when finished: automatic harness lifecycle tracking is not available.
+Service restarts lose attachments/waiting requests but retain credentials; backend restarts invalidate credentials. Updating files does not reload the service: check its running version, restart only when active work will not be disturbed, then reattach. Disconnect explicitly when finished; conversation-close detection is not implemented. After uncertain delivery, check local Codex before resending.
+
+See [connector setup and troubleshooting](../../../Client/README.md) and [protocol details](../../../Client/docs/protocol.md).

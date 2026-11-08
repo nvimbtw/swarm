@@ -33,6 +33,10 @@ builder.Services.AddSingleton<ConnectionDiagnostics>();
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<PairingService>();
 builder.Services.AddSingleton<SessionRegistry>();
+builder.Services.AddSingleton<AgentRouter>();
+builder.Services.AddSingleton<AgentDiscordPublisher>();
+builder.Services.AddSingleton<IAgentEventSink>(s => s.GetRequiredService<AgentDiscordPublisher>());
+builder.Services.AddHostedService(s => s.GetRequiredService<AgentDiscordPublisher>());
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
@@ -49,7 +53,9 @@ builder.Services.AddRateLimiter(options =>
 // Discord Gateway
 builder.Services
     .AddDiscordGateway()
-    .AddApplicationCommands();
+    .AddApplicationCommands<NetCord.ApplicationCommandInteraction,
+        NetCord.Services.ApplicationCommands.ApplicationCommandContext,
+        NetCord.Services.ApplicationCommands.AutocompleteInteractionContext>();
 
 var app = builder.Build();
 
