@@ -19,11 +19,11 @@ public sealed class PairingController(PairingService pairing) : ControllerBase
     }
 
     [HttpPost("complete")]
-    public IActionResult Complete(CompletePairingRequest request)
+    public async Task<IActionResult> Complete(CompletePairingRequest request, CancellationToken ct)
     {
         if (!Valid(request.PairingId, 64) || !Valid(request.Secret, 128) || !Valid(request.Code, 16))
             return BadRequest(new { error = "invalid_pairing" });
-        var credential = pairing.Complete(request.PairingId, request.Secret, request.Code);
+        var credential = await pairing.CompleteAsync(request.PairingId, request.Secret, request.Code, ct);
         return credential is null ? Unauthorized(new { error = "pairing_rejected" }) : Ok(credential);
     }
 
