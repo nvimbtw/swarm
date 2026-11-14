@@ -1,4 +1,3 @@
-
 using Microsoft.Data.Sqlite;
 
 namespace Swarm.Server.Db;
@@ -9,16 +8,19 @@ public class DatabaseService
 
     public DatabaseService(IWebHostEnvironment environment)
     {
-        string folder = Path.Combine(
-            environment.ContentRootPath,
-            "Data"
-        );
-
+        string folder = Path.Combine(environment.ContentRootPath, "Data");
         Directory.CreateDirectory(folder);
 
         string path = Path.Combine(folder, "swarm.db");
 
-        connectionString = $"Data Source={path}";
+        SqliteConnectionStringBuilder builder = new SqliteConnectionStringBuilder
+        {
+            DataSource = path,
+            ForeignKeys = true,
+            Pooling = true
+        };
+
+        connectionString = builder.ToString();
     }
 
     public SqliteConnection CreateConnection()

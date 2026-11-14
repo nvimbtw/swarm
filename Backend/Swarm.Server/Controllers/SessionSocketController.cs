@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Net.WebSockets;
 using System.Text.Json;
 using Microsoft.AspNetCore.Mvc;
+using Swarm.Server.Classi;
 using Swarm.Server.Connections;
 using Swarm.Server.Diagnostics;
 
@@ -19,7 +20,7 @@ public sealed class SessionSocketController(PairingService pairing, SessionRegis
     {
         string authorization = Request.Headers.Authorization.ToString();
         var identity = authorization.StartsWith("Bearer ", StringComparison.Ordinal)
-            ? pairing.Authenticate(authorization[7..]) : null;
+            ? await pairing.AuthenticateAsync(authorization[7..], HttpContext.RequestAborted) : null;
         if (identity is null) { Response.StatusCode = 401; return; }
         if (!HttpContext.WebSockets.IsWebSocketRequest) { Response.StatusCode = 400; return; }
 
@@ -28,10 +29,11 @@ public sealed class SessionSocketController(PairingService pairing, SessionRegis
             HttpContext.RequestAborted, lifetime.ApplicationStopping);
         var ct = cancellation.Token;
         Guid connectionId = diagnostics.OpenConnection();
-        // Fixed limit across fragmented frames, not just each individual frame.
         var buffer = new byte[64 * 1024 + 1];
         using var sendGate = new SemaphoreSlim(1, 1);
-        agents.Connect(connectionId, SendCore, () => pairing.Authenticate(authorization[7..]) is not null);
+        bool credentialValid = true;
+        agents.Connect(connectionId, SendCore, () => credentialValid);
+
         try
         {
             await Send(new { type = "hello", version = 1, ownerId = identity.OwnerId });
@@ -54,12 +56,15 @@ public sealed class SessionSocketController(PairingService pairing, SessionRegis
                         return;
                     }
                 } while (!received.EndOfMessage);
+
                 diagnostics.RecordReceived(connectionId);
-                if (pairing.Authenticate(authorization[7..]) is null)
+                if (await pairing.AuthenticateAsync(authorization[7..], ct) is null)
                 {
+                    credentialValid = false;
                     await Close(WebSocketCloseStatus.PolicyViolation, "Credential replaced; reconnect");
                     return;
                 }
+
                 string? requestId = null;
                 try
                 {
@@ -68,6 +73,7 @@ public sealed class SessionSocketController(PairingService pairing, SessionRegis
                     requestId = message.GetProperty("id").GetString();
                     if (!PairingController.Valid(requestId, 100) || message.GetProperty("version").GetInt32() != 1)
                         throw new JsonException("Invalid envelope");
+
                     switch (message.GetProperty("type").GetString())
                     {
                         case "agent.reply":
@@ -86,7 +92,7 @@ public sealed class SessionSocketController(PairingService pairing, SessionRegis
                             {
                                 id = requestId,
                                 type = "session.registered",
-                                payload = registry.Register(connectionId, identity, registration)
+                                payload = await registry.RegisterAsync(connectionId, identity, registration, ct)
                             });
                             break;
                         case "session.unregister":
@@ -95,7 +101,7 @@ public sealed class SessionSocketController(PairingService pairing, SessionRegis
                             {
                                 id = requestId,
                                 type = "session.unregistered",
-                                removed = registry.Remove(connectionId, sessionId)
+                                removed = await registry.RemoveAsync(connectionId, sessionId, ct)
                             });
                             break;
                         case "session.list":
@@ -120,7 +126,7 @@ public sealed class SessionSocketController(PairingService pairing, SessionRegis
         catch (WebSocketException exception) { logger.LogDebug(exception, "Session connection ended."); }
         finally
         {
-            registry.Disconnect(connectionId);
+            await registry.DisconnectAsync(connectionId);
             await agents.DisconnectAsync(connectionId);
             diagnostics.CloseConnection(connectionId);
         }

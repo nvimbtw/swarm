@@ -1,15 +1,16 @@
 using System.Security.Cryptography;
 using System.Text;
+using Swarm.Server.Classi;
+using Swarm.Server.Db.Repositories;
 
 namespace Swarm.Server.Connections;
 
-// Deliberately in-memory until database support lands. Only hashes of bearer secrets are retained.
-public sealed class PairingService(TimeProvider clock)
+public sealed class PairingService(TimeProvider clock, CredentialRepository credentials)
 {
     private readonly object _gate = new();
     private readonly Dictionary<string, PendingPairing> _pending = new();
-    private readonly Dictionary<string, InstallationIdentity> _credentials = new();
 
+    // Ustvari novo zahtevo za povezovanje.
     public PairingChallenge Start(string machineId, string machineName)
     {
         lock (_gate)
@@ -17,75 +18,102 @@ public sealed class PairingService(TimeProvider clock)
             foreach (string id in _pending.Where(x => x.Value.ExpiresAt <= clock.GetUtcNow())
                          .Select(x => x.Key).ToArray())
                 _pending.Remove(id);
-            if (_pending.Count >= 1000) throw new InvalidOperationException("Pairing capacity reached.");
+
+            if (_pending.Count >= 1000)
+                throw new InvalidOperationException("Pairing capacity reached.");
+
             string pairingId = Guid.NewGuid().ToString("N");
             string secret = NewSecret();
             var expires = clock.GetUtcNow().AddMinutes(5);
-            _pending.Add(pairingId, new(machineId, machineName, Hash(secret), expires));
+
+            _pending.Add(pairingId, new PendingPairing(machineId, machineName, Hash(secret), expires));
+
             return new(pairingId, secret, expires);
         }
     }
 
+    // Odobri povezovanje prek Discorda.
     public DiscordPairingCode? Approve(string pairingId, string discordUserId)
     {
         lock (_gate)
         {
             if (!_pending.TryGetValue(pairingId, out var pending) ||
-                pending.ExpiresAt <= clock.GetUtcNow() || pending.OwnerId is not null) return null;
+                pending.ExpiresAt <= clock.GetUtcNow() ||
+                pending.OwnerId is not null || pending.Completing)
+                return null;
+
             string code = RandomNumberGenerator.GetInt32(100_000_000).ToString("D8");
+
             pending.OwnerId = discordUserId;
             pending.CodeHash = Hash(code);
+
             return new(code, pending.MachineName, pending.ExpiresAt);
         }
     }
 
-    public IssuedCredential? Complete(string pairingId, string secret, string code)
+    // Zaključi povezovanje in shrani žeton v bazo.
+    public async Task<IssuedCredential?> CompleteAsync(string pairingId, string secret, string code,
+        CancellationToken ct = default)
     {
+        PendingPairing pending;
+        string ownerId;
+
         lock (_gate)
         {
-            if (!_pending.TryGetValue(pairingId, out var pending) ||
-                pending.ExpiresAt <= clock.GetUtcNow() || !Matches(secret, pending.SecretHash)) return null;
-            if (pending.OwnerId is null) return null;
-            if (!Matches(code, pending.CodeHash!))
+            if (!_pending.TryGetValue(pairingId, out var found) ||
+                found.ExpiresAt <= clock.GetUtcNow() ||
+                found.OwnerId is null || found.CodeHash is null ||
+                found.Completing || !Matches(secret, found.SecretHash))
+                return null;
+
+            if (!Matches(code, found.CodeHash))
             {
-                if (++pending.Attempts >= 5) _pending.Remove(pairingId);
+                if (++found.Attempts >= 5)
+                    _pending.Remove(pairingId);
+
                 return null;
             }
-            // Replace this installation's previous credential when it pairs again.
-            foreach (var key in _credentials.Where(x => x.Value.OwnerId == pending.OwnerId &&
-                         x.Value.MachineId == pending.MachineId).Select(x => x.Key).ToArray())
-                _credentials.Remove(key);
-            string token = NewSecret();
-            var identity = new InstallationIdentity(pending.OwnerId, pending.MachineId, pending.MachineName);
-            _credentials.Add(Hash(token), identity);
-            _pending.Remove(pairingId);
-            return new(token, identity.OwnerId);
+
+            found.Completing = true;
+            pending = found;
+            ownerId = found.OwnerId;
+        }
+
+        string token = NewSecret();
+
+        try
+        {
+            await credentials.IssueCredentialAsync(
+                ownerId, pending.MachineId, pending.MachineName, Hash(token), ct);
+
+            lock (_gate)
+                _pending.Remove(pairingId);
+
+            return new(token, ownerId);
+        }
+        catch
+        {
+            lock (_gate)
+                pending.Completing = false;
+
+            throw;
         }
     }
 
-    public InstallationIdentity? Authenticate(string token)
+    // Preveri žeton v bazi.
+    public Task<InstallationIdentity?> AuthenticateAsync(string token, CancellationToken ct = default)
     {
-        lock (_gate) return _credentials.GetValueOrDefault(Hash(token));
+        return credentials.AuthenticateAsync(Hash(token), ct);
     }
 
-    private static string NewSecret() => Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
-    private static string Hash(string value) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value)));
+    private static string NewSecret() =>
+        Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
+
+    private static string Hash(string value) =>
+        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value)));
+
     private static bool Matches(string value, string hash) =>
-        CryptographicOperations.FixedTimeEquals(Convert.FromHexString(Hash(value)), Convert.FromHexString(hash));
-
-    private sealed class PendingPairing(string machineId, string machineName, string secretHash, DateTimeOffset expiresAt)
-    {
-        public string MachineId { get; } = machineId;
-        public string MachineName { get; } = machineName;
-        public string SecretHash { get; } = secretHash;
-        public DateTimeOffset ExpiresAt { get; } = expiresAt;
-        public string? OwnerId { get; set; }
-        public string? CodeHash { get; set; }
-        public int Attempts { get; set; }
-    }
+        CryptographicOperations.FixedTimeEquals(
+            Convert.FromHexString(Hash(value)),
+            Convert.FromHexString(hash));
 }
-
-public sealed record PairingChallenge(string PairingId, string Secret, DateTimeOffset ExpiresAt);
-public sealed record DiscordPairingCode(string Code, string MachineName, DateTimeOffset ExpiresAt);
-public sealed record IssuedCredential(string Token, string OwnerId);
-public sealed record InstallationIdentity(string OwnerId, string MachineId, string MachineName);

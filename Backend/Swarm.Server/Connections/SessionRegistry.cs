@@ -1,42 +1,52 @@
+using Swarm.Server.Classi;
+using Swarm.Server.Db.Repositories;
+
 namespace Swarm.Server.Connections;
 
-public sealed class SessionRegistry
+public sealed class SessionRegistry(SessionRepository data)
 {
     private readonly object _gate = new();
     private readonly Dictionary<Guid, RegisteredSession> _sessions = new();
 
-    public RegisteredSession Register(Guid connectionId, InstallationIdentity identity, SessionRegistration request)
+    public async Task<RegisteredSession> RegisterAsync(Guid connectionId, InstallationIdentity identity,
+        SessionRegistration request, CancellationToken ct = default)
     {
         lock (_gate)
         {
             if (_sessions.TryGetValue(request.SessionId, out var existing) &&
                 (existing.Identity.OwnerId != identity.OwnerId || existing.Identity.MachineId != identity.MachineId))
                 throw new InvalidOperationException("Session ID is already owned by another installation.");
-            // A reconnect can arrive before the old transport's finally block. Rebind the same
-            // installation's ID; old-connection cleanup must never remove the new registration.
-            if (!_sessions.ContainsKey(request.SessionId) &&
-                _sessions.Values.Count(x => x.Identity.OwnerId == identity.OwnerId &&
-                    x.Identity.MachineId == identity.MachineId) >= 100)
+            if (!_sessions.ContainsKey(request.SessionId) && _sessions.Values.Count(x =>
+                x.Identity.OwnerId == identity.OwnerId && x.Identity.MachineId == identity.MachineId) >= 100)
                 throw new InvalidOperationException("Session limit reached.");
-            var session = new RegisteredSession(request.SessionId, connectionId, identity,
-                request.Name, request.ProjectId, request.Harness, request.Mode, DateTimeOffset.UtcNow, request.Control);
-            _sessions[request.SessionId] = session;
-            return session;
         }
+
+        await data.RegisterSessionAsync(identity, request, ct);
+        var session = new RegisteredSession(request.SessionId, connectionId, identity, request.Name,
+            request.ProjectId, request.Harness, request.Mode, DateTimeOffset.UtcNow, request.Control);
+        lock (_gate) _sessions[request.SessionId] = session;
+        return session;
     }
 
-    public bool Remove(Guid connectionId, Guid sessionId)
+    public async Task<bool> RemoveAsync(Guid connectionId, Guid sessionId, CancellationToken ct = default)
     {
+        bool removed;
         lock (_gate)
-            return _sessions.TryGetValue(sessionId, out var session) &&
+            removed = _sessions.TryGetValue(sessionId, out var session) &&
                 session.ConnectionId == connectionId && _sessions.Remove(sessionId);
+        if (removed) await data.SetSessionStateAsync(sessionId, "disconnected", ct);
+        return removed;
     }
 
-    public void Disconnect(Guid connectionId)
+    public async Task DisconnectAsync(Guid connectionId, CancellationToken ct = default)
     {
+        Guid[] ids;
         lock (_gate)
-            foreach (var id in _sessions.Where(x => x.Value.ConnectionId == connectionId).Select(x => x.Key).ToArray())
-                _sessions.Remove(id);
+        {
+            ids = _sessions.Where(x => x.Value.ConnectionId == connectionId).Select(x => x.Key).ToArray();
+            foreach (var id in ids) _sessions.Remove(id);
+        }
+        foreach (var id in ids) await data.SetSessionStateAsync(id, "disconnected", ct);
     }
 
     public static bool CanUse(RegisteredSession session, string userId) =>
@@ -45,8 +55,7 @@ public sealed class SessionRegistry
 
     public RegisteredSession? FindAvailable(string userId, Guid sessionId)
     {
-        lock (_gate) return _sessions.TryGetValue(sessionId, out var session) && CanUse(session, userId)
-            ? session : null;
+        lock (_gate) return _sessions.TryGetValue(sessionId, out var session) && CanUse(session, userId) ? session : null;
     }
 
     public RegisteredSession[] Available(string userId)
@@ -59,7 +68,3 @@ public sealed class SessionRegistry
         lock (_gate) return _sessions.Values.Where(x => x.Identity.OwnerId == ownerId).ToArray();
     }
 }
-
-public sealed record SessionRegistration(Guid SessionId, string Name, string ProjectId, string Harness, string Mode, bool Control = false);
-public sealed record RegisteredSession(Guid SessionId, Guid ConnectionId, InstallationIdentity Identity,
-    string Name, string ProjectId, string Harness, string Mode, DateTimeOffset ConnectedAt, bool Control = false);
