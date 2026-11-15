@@ -10,6 +10,7 @@ namespace Swarm.Server.Controllers;
 
 [ApiController]
 public sealed class SessionSocketController(PairingService pairing, SessionRegistry registry, AgentRouter agents,
+    DiscordChatService chat,
     ConnectionDiagnostics diagnostics, IHostApplicationLifetime lifetime,
     ILogger<SessionSocketController> logger) : ControllerBase
 {
@@ -32,8 +33,8 @@ public sealed class SessionSocketController(PairingService pairing, SessionRegis
         var buffer = new byte[64 * 1024 + 1];
         using var sendGate = new SemaphoreSlim(1, 1);
         bool credentialValid = true;
+        var chatRequests = new List<Task>();
         agents.Connect(connectionId, SendCore, () => credentialValid);
-
         try
         {
             await Send(new { type = "hello", version = 1, ownerId = identity.OwnerId });
@@ -76,6 +77,19 @@ public sealed class SessionSocketController(PairingService pairing, SessionRegis
 
                     switch (message.GetProperty("type").GetString())
                     {
+                        case "discord.channel":
+                        case "discord.read":
+                        case "discord.send":
+                            chatRequests.RemoveAll(task => task.IsCompletedSuccessfully);
+                            if (chatRequests.Count >= 16)
+                            {
+                                await Send(new { id = requestId, type = "error", error = "chat_busy" });
+                                break;
+                            }
+                            var chatRequest = message.GetProperty("payload").Deserialize<ChatRequest>(JsonOptions)
+                                ?? throw new JsonException("Invalid chat request");
+                            chatRequests.Add(HandleChat(requestId!, message.GetProperty("type").GetString()!, chatRequest));
+                            break;
                         case "agent.reply":
                         case "agent.event":
                             await agents.AcceptAsync(connectionId, message.GetProperty("type").GetString()!,
@@ -126,12 +140,50 @@ public sealed class SessionSocketController(PairingService pairing, SessionRegis
         catch (WebSocketException exception) { logger.LogDebug(exception, "Session connection ended."); }
         finally
         {
+            await cancellation.CancelAsync();
+            await Task.WhenAll(chatRequests);
             await registry.DisconnectAsync(connectionId);
             await agents.DisconnectAsync(connectionId);
             diagnostics.CloseConnection(connectionId);
         }
 
         Task Send(object message) => SendCore(message, ct);
+
+        async Task HandleChat(string id, string kind, ChatRequest request)
+        {
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeout.CancelAfter(TimeSpan.FromSeconds(8));
+            object response;
+            try
+            {
+                var result = await chat.ExecuteAsync(connectionId, kind, request, timeout.Token);
+                response = new { id, type = "discord.result", payload = result };
+            }
+            catch (ChatException error) { response = new { id, type = "error", error = error.Message }; }
+            catch (NetCord.Rest.RestException error)
+            {
+                response = new { id, type = "error", error = (int)error.StatusCode switch
+                {
+                    403 => "discord_access_denied", 404 => "discord_not_found",
+                    400 => "discord_invalid_request", 429 => "discord_rate_limited",
+                    _ => kind == "discord.send" ? "chat_delivery_unknown_check_discord" : "discord_unavailable"
+                } };
+            }
+            catch (Exception error) when (error is OperationCanceledException or HttpRequestException)
+            {
+                if (ct.IsCancellationRequested) return;
+                response = new { id, type = "error", error = kind == "discord.send"
+                    ? "chat_delivery_unknown_check_discord" : "discord_unavailable" };
+            }
+            catch (Exception error)
+            {
+                logger.LogWarning("Discord chat request failed ({ErrorType}).", error.GetType().Name);
+                response = new { id, type = "error", error = kind == "discord.send"
+                    ? "chat_delivery_unknown_check_discord" : "discord_unavailable" };
+            }
+            try { await Send(response); }
+            catch (Exception error) when (error is OperationCanceledException or WebSocketException) { }
+        }
 
         async Task SendCore(object message, CancellationToken token)
         {

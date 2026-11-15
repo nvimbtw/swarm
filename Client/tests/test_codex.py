@@ -93,6 +93,56 @@ class CodexTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(methods.count("thread/queue/add"), 1)
         self.assertNotIn("turn/steer", methods)
 
+    async def test_native_cli_can_consume_the_prompt_before_add_replies(self):
+        (self.root / "cli-before-add-reply").touch()
+        await self.adapter.submit(self.session, self.request(), self.emit)
+        await self.wait_events("completed")
+        self.assertEqual(self.events[-1]["turnId"], "cli-early")
+        methods = [c["method"] for c in self.calls()]
+        self.assertEqual(methods.count("thread/queue/add"), 1)
+        self.assertNotIn("thread/queue/start", methods)
+        self.assertNotIn("Local progress", self.events[-1]["output"])
+
+    async def test_native_cli_start_race_is_correlated_instead_of_reported_unknown(self):
+        (self.root / "cli-start-race").touch()
+        await self.adapter.submit(self.session, self.request(), self.emit)
+        await self.wait_events("completed")
+        self.assertEqual(self.events[-1]["turnId"], "cli-turn")
+        self.assertFalse(any(e["status"] == "unknown" for e in self.events))
+        methods = [c["method"] for c in self.calls()]
+        self.assertEqual(methods.count("thread/queue/add"), 1)
+        self.assertEqual(methods.count("thread/queue/start"), 1)
+
+    async def test_missed_notifications_recover_completed_output_by_exact_request_id(self):
+        (self.root / "cli-start-race").touch()
+        (self.root / "history-only").touch()
+        request = self.request()
+        await self.adapter.submit(self.session, request, self.emit)
+        await self.wait_events("completed")
+        self.assertEqual(self.events[-1]["turnId"], "cli-turn")
+        self.assertIn(request["prompt"], self.events[-1]["output"])
+        self.assertNotIn("Local progress", self.events[-1]["output"])
+        self.assertFalse(self.rpc.requests)
+
+    async def test_lost_add_response_is_reconciled_without_republishing_the_prompt(self):
+        (self.root / "add-response-error").touch()
+        await self.adapter.submit(self.session, self.request(), self.emit)
+        await self.wait_events("completed")
+        self.assertEqual(self.events[-1]["turnId"], "cli-add")
+        methods = [c["method"] for c in self.calls()]
+        self.assertEqual(methods.count("thread/queue/add"), 1)
+        self.assertNotIn("thread/queue/start", methods)
+
+    async def test_unknown_delivery_never_adopts_an_unrelated_completed_turn(self):
+        (self.root / "race").touch()
+        self.daemon.history[self.session["harness_session_id"]] = [{"id": "unrelated", "status": "completed", "items": [
+            {"type": "userMessage", "id": "someone", "clientId": str(uuid.uuid4()), "content": []},
+            {"type": "agentMessage", "id": "other-answer", "text": "UNRELATED ANSWER"}]}]
+        await self.adapter.submit(self.session, self.request(), self.emit)
+        await self.wait_events("unknown")
+        self.assertFalse(any(e["status"] == "completed" for e in self.events))
+        self.assertNotIn("UNRELATED ANSWER", json.dumps(self.events))
+
     async def test_atomic_start_retries_busy_without_requeueing(self):
         (self.root / "busy-race").touch()
         await self.adapter.submit(self.session, self.request(), self.emit)
@@ -114,6 +164,16 @@ class CodexTests(unittest.IsolatedAsyncioTestCase):
             "turn": {"id": "local-turn", "status": "completed"}})
         await self.wait_events("completed")
         self.assertEqual(self.events[-1]["output"], "new answer")
+
+    async def test_local_commentary_is_not_automatically_shared(self):
+        thread = self.session["harness_session_id"]
+        for item in [
+            {"id": "progress", "phase": "commentary", "text": "Detailed local progress"},
+            {"id": "answer", "phase": "final_answer", "text": "Shared result"},
+        ]:
+            self.rpc.notification("item/completed", {"threadId": thread, "turnId": "turn",
+                "item": {"type": "agentMessage", **item}})
+        self.assertEqual(self.rpc.turns[(thread, "turn")].output_since(set()), "Shared result")
 
     async def test_unloaded_thread_is_not_silently_resumed_in_another_server(self):
         before = len([c for c in self.calls() if c["method"] == "thread/resume"])

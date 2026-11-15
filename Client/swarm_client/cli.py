@@ -13,7 +13,7 @@ async def rpc(home, request):
     try:
         writer.write((json.dumps(request) + "\n").encode())
         await writer.drain()
-        return json.loads(await asyncio.wait_for(reader.readline(), 20))
+        return json.loads(await asyncio.wait_for(reader.readline(), 60 if request.get("operation") == "connect" else 20))
     finally:
         writer.close()
         await writer.wait_closed()
@@ -80,6 +80,7 @@ async def execute(args, parser):
             if session:
                 result = {"status": session["state"], "session": session}
     if args.command == "connect" and "session" in result:
+        result["mcp"] = result["session"].get("mcp", {"ready": False, "state": "unavailable"})
         controlled = result["session"]["registration"].get("control", False)
         result["delivery"] = {"ready": controlled and result["status"] == "registered",
             "state": "enabled" if controlled else "registration_only"}
@@ -94,6 +95,12 @@ def main():
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("serve", help="Run the shared local service in the foreground")
     commands.add_parser("status", help="Inspect the local service and its session states")
+    mcp = commands.add_parser("mcp", help="Serve session-bound Discord MCP tools over stdio")
+    mcp.add_argument("--backend", help="Backend origin; defaults to workspace preferences")
+    mcp.add_argument("--workspace", default=str(Path.cwd()))
+    mcp.add_argument("--session", help="Swarm attachment ID (from connect)")
+    mcp.add_argument("--harness-session-id", help="Native thread ID; defaults to CODEX_THREAD_ID")
+    mcp.add_argument("--auto", action="store_true", help="Route using the native thread ID in each MCP call's metadata")
     for command in ("pair-start", "pair-complete", "connect", "disconnect", "sessions"):
         sub = commands.add_parser(command)
         sub.add_argument("--backend", help="HTTP(S) backend origin, e.g. http://localhost:5142")
@@ -115,6 +122,17 @@ def main():
         if command == "disconnect":
             sub.add_argument("--session", required=True)
     args = parser.parse_args()
+    if args.command == "mcp":
+        # Stdout belongs exclusively to MCP JSON-RPC, including startup failures.
+        try:
+            from .mcp import create_server
+            create_server(args.home, args.backend, session_id=args.session,
+                          harness_session_id=args.harness_session_id, workspace=args.workspace,
+                          auto=args.auto).run(transport="stdio")
+        except (ValueError, OSError) as error:
+            print(str(error), file=sys.stderr)
+            sys.exit(1)
+        return
     try:
         result = asyncio.run(execute(args, parser))
     except (OSError, TimeoutError):
@@ -127,6 +145,9 @@ def main():
     if result is not None:
         print(json.dumps(result, indent=2))
         if result.get("status") in {"error", "pairing_required", "pending", "rejected"}:
+            sys.exit(1)
+        if (args.command == "connect" and result.get("delivery", {}).get("ready") and
+                not result.get("mcp", {}).get("ready")):
             sys.exit(1)
 
 

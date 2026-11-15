@@ -12,11 +12,14 @@ The backend owns Discord identity, authorization, and result destinations. The l
 | `protocol.py` | Wire limits, result encoding, delivery failure classification. |
 | `codex_rpc.py` | Codex WebSocket handshake, RPC replies, bounded turn-result observation. |
 | `codex.py` | Model validation, one queue worker per native thread, atomic queue start, steering. |
+| `mcp.py` | Stdio tools bound by per-call native thread metadata or explicit startup binding; forwards calls via private connector RPC. |
+| `mcp_setup.py` | Native config registration, live MCP refresh, inventory and connection verification. |
 | `SessionSocketController` | Authenticated backend transport, frame bounds, serialized sends. |
 | `SessionRegistry` | Installation ownership, reconnect rebinding, Solo/Swarm availability. |
 | `AgentRouter` | Request admission, acknowledgment waiters, authenticated event routing. |
 | `AgentCommand`, `AgentAutocomplete` | Discord interaction and caller-scoped choices. |
 | `AgentDiscordPublisher` | Bounded Discord publication outside the socket receive loop. |
+| `DiscordChatService`, `DiscordChatClient` | Session/transport binding, Discord permission checks, history and posting. |
 
 ## Pairing and registration
 
@@ -36,10 +39,29 @@ Every subsequent envelope contains `version: 1`, `id`, `type`, and, when needed,
 | `session.unregister` | `sessionId` | `session.unregistered`, with `removed` |
 | `session.list` | None | `session.listed`, with owner-scoped registrations |
 | `ping` | None | `pong` |
+| `discord.channel` | `sessionId`, `channelId` | `discord.result` with channel metadata |
+| `discord.read` | `sessionId`, `channelId`, optional `limit` (1–50), `beforeMessageId` | `discord.result` with `channel`, chronological `messages`, `nextBeforeMessageId` |
+| `discord.send` | `sessionId`, `channelId`, `content` (1–1,800 chars), optional `replyToMessageId` | `discord.result` with `channelId`, `messageId`, `url` |
 
 Errors use `type: error` with an `error` code. The unauthenticated `/ws` greeting demo is unrelated to this protocol.
 
 A registration's identity comes from its bearer credential. Session ID collisions across installations are rejected. The same installation may rebind its ID during reconnect; cleanup of the old transport cannot remove the new registration. Disconnect removes that connection's registrations.
+
+## Agent-controlled Discord chat
+
+Chat RPC travels in the connector-to-backend direction over the **existing session WebSocket**, with normal envelope ID correlation. There is no second backend HTTP/MCP listener, token in the harness, or per-tool backend connection. The stdio MCP process calls the existing user-only Unix connector socket. In automatic mode, each call carries the native `threadId` from Codex MCP request metadata. The connector resolves exactly one matching registered native attachment across its backends; it rejects absent or ambiguous identity. No process environment or workspace fallback is used in this mode. Manual startup configuration can instead bind one Swarm session or one unambiguous native-thread/workspace attachment. Tool arguments cannot select a different session. Processes running as the same OS user remain inside the connector's local trust boundary.
+
+Native `connect` installs the generic `swarm mcp --auto` stdio configuration with the selected daemon's `config/value/write`, then uses `config/mcpServer/reload` to refresh loaded threads. The shared registration contains the connector home and Python entry point, not a pinned conversation, backend credential, or project. Reconnecting preserves other servers and avoids redundant configuration writes. An unrelated `swarm` entry is never overwritten. Configuration and verification run outside the backend registration lock, so the MCP callback can query the local service during setup. Setup is serialized per daemon adapter and bounded to 25 seconds; local connect RPC permits 60 seconds for attachment, registration, and setup.
+
+MCP readiness requires the selected thread's inventory to advertise all four tools and a successful `swarm_status` call returning the same Swarm session ID and a connected backend. This call stays local and does not publish to Discord. The result is exposed as `mcp.ready` separately from registration and prompt-delivery readiness. Unsupported APIs, conflicts, missing tools, and failed verification report failure without starting, transferring, or restarting a harness conversation. Metadata-only sessions retain manual MCP setup.
+
+The backend requires the session to belong to this authenticated connection; control capability is not required for MCP. The session's paired Discord owner determines guild access, regardless of Solo/Swarm mode. NetCord evaluates roles and channel overwrites, including thread parent permissions; private threads also require membership or thread-management rights. The Discord REST API enforces the bot's own access. Chat access is not scoped by project label or by the user who most recently sent `/agent`.
+
+`channelId` addresses either an existing guild text channel or a thread. A send contains one attributed Discord message, with mentions disabled and an optional reply reference that fails when the target no longer exists. Archived/locked thread writes are rejected without changing thread state. History returns message/author IDs as strings, names, bot flags, content, timestamps, reply references, embed footer text, and up to five attachment links. It never downloads attachments. Page JSON stays below 54 KiB, reserving room for the envelope within the 64 KiB wire limit. If size limits shorten a page, its cursor still refers to the oldest included message; an individual oversized message fails explicitly.
+
+MCP posts and automatic results share an embed footer format beneath the body: agent name; paired owner name and ID; harness; project; machine name and ID; session UUID; and channel/thread name and ID. Automatic results add the request UUID, status, and split-message part number. The bot needs Embed Links permission. MCP attribution is derived from the authenticated live registration; the agent cannot override it in tool arguments. The router snapshots attribution with the pending request, preserving the original identity after rename or disconnect. Discord name lookups are best-effort with ID fallbacks; no native harness IDs or workspace paths are added to the footer.
+
+Up to 16 chat operations per connection run independently of the receive loop, each with an eight-second deadline, so Discord REST does not block harness requests, acknowledgments, or registrations. The connector waits ten seconds for a correlated backend response. Lost connections/timeouts on sends return uncertain delivery and are not retried or replayed. There is no durable chat idempotency store. Read the destination before resending. Read calls are snapshots, not live subscriptions; `/agent` remains the mechanism for waking the harness.
 
 ## Harness requests and results
 
@@ -63,6 +85,8 @@ The backend sends `agent.submit` or `agent.describe` through the selected sessio
 }
 ```
 
+For submissions the connector includes the originating channel/thread, Swarm session, and prompt receipt message IDs in the native harness prompt, so the agent can address and reply to the original request through chat tools.
+
 `agent.describe` uses the same addressing fields and returns options without submitting input. The connector replies with `agent.reply`, the original envelope ID, and `payload.requestId`/`sessionId`:
 
 | Reply status | Meaning |
@@ -75,13 +99,13 @@ The backend sends `agent.submit` or `agent.describe` through the selected sessio
 
 Subsequent `agent.event` envelopes have fresh envelope IDs but retain the original payload `requestId` and `sessionId`. Their status is `started`, `completed`, `failed`, `interrupted`, or `unknown`, with optional `turnId`, `output`, and `error`. The connector sends the acknowledgment before releasing event publication, including when Codex completes before its RPC reply arrives.
 
-The router retains the original Discord destination and accepts replies/events only from the selected session's authenticated connection. A client cannot redirect results by supplying a channel or sender in an event. Authorization is checked at submission and again locally before queued delivery. `solo` requires the paired owner; `swarm` allows other bot users without project/guild scoping. Credential replacement is checked even on otherwise idle sockets.
+The Discord command creates a public prompt receipt before calling the router. The router retains the original prompt, receipt message ID, and Discord destination and accepts replies/events only from the selected session's authenticated connection. Automatic replies reference that receipt with `fail_if_not_exists=false` and retain a bounded prompt excerpt if the receipt has been deleted. Client events cannot override either prompt or receipt ID. A client cannot redirect results by supplying a channel or sender in an event. Authorization is checked at submission and again locally before queued delivery. `solo` requires the paired owner; `swarm` allows other bot users without project/guild scoping. Credential replacement is checked even on otherwise idle sockets.
 
 ## Codex delivery ownership
 
 The daemon's control socket requires HTTP WebSocket Upgrade. It is not the JSONL transport of `codex app-server --listen stdio://`. Initialization opts into the experimental API required by the native queue methods. Attachment verifies `thread/read`, live `canAcceptDirectInput`, workspace identity, and `thread/queue/list` before subscribing with `thread/resume`. Stored history on another process is never resumed to manufacture a controllable session.
 
-For queued requests, one worker per native thread waits for idle and an empty native queue, then applies explicit session settings, adds a native submission, and starts that exact submission with Codex's atomic start-if-idle operation. A definite idle-precondition failure can retry the same native entry. An ambiguous start response cannot re-enqueue it or substitute `turn/steer`. Explicit settings persist in Codex for subsequent turns.
+For queued requests, one worker per native thread waits for idle and an empty native queue, then applies explicit session settings, adds a native submission, and starts that exact submission with Codex's atomic start-if-idle operation. A definite idle-precondition failure can retry the same native entry. Correlation starts before `thread/queue/add`, because the native CLI can consume the submission before the add/start RPC replies. User-message notifications identify its turn using `clientId == requestId`. After an ambiguous or rejected queue operation, the connector also searches up to ten recent display-summary turns within a three-second reconciliation deadline and adopts only an exact client ID match. Completed matching turns hydrate final assistant text from history; commentary and unrelated turns are excluded. A definite busy-precondition failure may retry the same entry only after reconciliation finds no match. An unresolved ambiguous response cannot re-enqueue input or substitute `turn/steer`. Explicit settings persist in Codex for subsequent turns.
 
 Injection uses `turn/steer` with `expectedTurnId`, fails if no turn is active, and rejects model/reasoning overrides. Result observation excludes agent messages completed before injection. Multiple injected requests may observe the same turn's result.
 
@@ -105,4 +129,4 @@ Before native acceptance, the connector owns the queued request and cancels it w
 
 Socket sends are serialized. Harness operations run in independent tasks so waiting on Codex does not block registration or heartbeat replies. The duplicate cache shares an in-flight acknowledgment instead of submitting the same request twice; it is not durable idempotency across reconnects. Transport reconnect uses jittered exponential backoff and restores only live registrations.
 
-Only agent message text is collected. Reasoning, tool arguments, transcript history, and approval payloads are not published. Discord mentions are disabled; local approval and question handling remain the responsibility of the Codex UI.
+Only agent message text is collected. Explicit `commentary` phase messages are excluded from automatic relay; final answers and legacy messages without phase metadata retain relay behavior. Reasoning, tool arguments, transcript history, and approval payloads are not published. Discord mentions are disabled; local approval handling remains the responsibility of the Codex UI. Agents can explicitly post shared questions through MCP, then read replies or receive a further `/agent` instruction.

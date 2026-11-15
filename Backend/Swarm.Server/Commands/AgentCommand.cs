@@ -8,7 +8,7 @@ namespace DiscordBot.Commands;
 
 public enum AgentDelivery { Queue, Inject }
 
-public sealed class AgentCommand(AgentRouter agents) : ApplicationCommandModule<ApplicationCommandContext>
+public sealed class AgentCommand(AgentRouter agents, SessionRegistry sessions) : ApplicationCommandModule<ApplicationCommandContext>
 {
     [SlashCommand("agent", "Send a prompt to a connected coding session")]
     public async Task Execute(
@@ -23,12 +23,23 @@ public sealed class AgentCommand(AgentRouter agents) : ApplicationCommandModule<
         [SlashCommandParameter(Name = "delivery", Description = "Queue by default; inject steers an active turn")]
             AgentDelivery delivery = AgentDelivery.Queue)
     {
-        await RespondAsync(InteractionCallback.DeferredMessage(MessageFlags.Ephemeral));
+        await RespondAsync(InteractionCallback.DeferredMessage());
         string content;
         try
         {
             if (!Guid.TryParse(session, out var sessionId)) throw new AgentRequestException("choose_a_connected_session");
-            var result = await agents.SubmitAsync(new(Context.User.Id.ToString(), Context.Channel.Id),
+            var selected = sessions.FindAvailable(Context.User.Id.ToString(), sessionId)
+                ?? throw new AgentRequestException("session_unavailable_or_not_allowed");
+            // Create a visible receipt before delivery: even an instant completion
+            // can reply to the exact prompt, and everyone in the conversation has context.
+            var receipt = await ModifyResponseAsync(message =>
+            {
+                message.Content = "Sending request to the connected agent…";
+                message.Embeds = [AgentMessagePresentation.PromptReceipt(selected.Name, prompt)];
+                message.AllowedMentions = AllowedMentionsProperties.None;
+            });
+            var result = await agents.SubmitAsync(new(Context.User.Id.ToString(), Context.Channel.Id,
+                    PromptMessageId: receipt.Id),
                 new(sessionId, prompt, delivery == AgentDelivery.Inject ? "inject" : "queue", model, reasoning));
             content = result.Status switch
             {
@@ -36,7 +47,8 @@ public sealed class AgentCommand(AgentRouter agents) : ApplicationCommandModule<
                     "The result will be posted in this channel. Approvals stay in local Codex.",
                 "injected" => $"Injected into the active Codex turn. Request `{result.RequestId}`. " +
                     "The active turn’s result will be posted in this channel.",
-                _ => $"Request `{result.RequestId}`: {result.Status}. {result.Error}"
+                _ => $"Request `{result.RequestId}`: " + AgentMessagePresentation.ResultText(
+                    new(result.RequestId, sessionId, result.Status, Error: result.Error))
             };
         }
         catch (AgentRequestException error) { content = $"Could not confirm delivery: {error.Message}"; }

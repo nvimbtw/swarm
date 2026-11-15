@@ -7,7 +7,7 @@ import uuid
 import aiohttp
 
 from .codex_rpc import CodexError
-from .protocol import MAX_MESSAGE_BYTES, MAX_PROMPT_CHARS, delivery_failure, encode_message
+from .protocol import MAX_MESSAGE_BYTES, MAX_OUTPUT_CHARS, MAX_PROMPT_CHARS, delivery_failure, encode_message
 
 
 class BackendError(RuntimeError):
@@ -185,6 +185,16 @@ class BackendLink:
     async def publish_agent_update(self, ws, request, update):
         if self.ws is not ws or ws.closed:
             return
+        if update.get("status") == "completed" and update.get("output") and not request.get("promptMessageId"):
+            # Older backends have no public prompt receipt. Preserve readable
+            # request context during a rolling upgrade, without a second post.
+            prompt = request.get("prompt", "")
+            excerpt = prompt[:600] + ("…" if len(prompt) > 600 else "")
+            prefix = "**In response to:**\n> " + excerpt.replace("\n", "\n> ") + "\n\n"
+            output = update["output"]
+            budget = MAX_OUTPUT_CHARS - len(prefix)
+            update = {**update, "output": prefix + output[-budget:],
+                      "truncated": update.get("truncated", False) or len(output) > budget}
         try:
             await self.send(ws, {
                 "version": 1, "id": str(uuid.uuid4()), "type": "agent.event",

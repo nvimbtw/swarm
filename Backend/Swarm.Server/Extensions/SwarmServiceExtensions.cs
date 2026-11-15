@@ -14,7 +14,7 @@ namespace Swarm.Server.Extensions;
 
 public static class SwarmServiceExtensions
 {
-    public static IServiceCollection AddSwarmServices(this IServiceCollection services)
+    public static IServiceCollection AddSwarmServices(this IServiceCollection services, IConfiguration configuration)
     {
         // HTTP storitve.
         services.AddControllers();
@@ -34,6 +34,8 @@ public static class SwarmServiceExtensions
         services.AddSingleton<PairingService>();
         services.AddSingleton<SessionRegistry>();
         services.AddSingleton<AgentRouter>();
+        services.AddSingleton<IDiscordChat, DiscordChatClient>();
+        services.AddSingleton<DiscordChatService>();
 
         // Discord publisher.
         services.AddSingleton<AgentDiscordPublisher>();
@@ -44,7 +46,12 @@ public static class SwarmServiceExtensions
 
         // Discord Gateway in ukazi.
         services
-            .AddDiscordGateway()
+            .AddDiscordGateway(options =>
+            {
+                if (configuration.GetValue<bool>("Discord:ReadMessageContent"))
+                    options.Intents = (options.Intents ?? NetCord.Gateway.GatewayIntents.AllNonPrivileged)
+                        | NetCord.Gateway.GatewayIntents.MessageContent;
+            })
             .AddApplicationCommands<
                 NetCord.ApplicationCommandInteraction,
                 NetCord.Services.ApplicationCommands.ApplicationCommandContext,
