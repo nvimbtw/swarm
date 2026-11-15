@@ -10,8 +10,7 @@ var builder = WebApplication.CreateBuilder(args);
 // Nastavi Discord token.
 builder.Configuration["Discord:Token"] = Env.GetString("DISCORD_TOKEN");
 
-// Registrira vse storitve aplikacije.
-builder.Services.AddSwarmServices();
+builder.Services.AddSwarmServices(builder.Configuration);
 
 var app = builder.Build();
 

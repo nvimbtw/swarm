@@ -2,7 +2,7 @@
 
 One local service connects multiple harness sessions to the backend through one authenticated WebSocket per backend origin. Discord `/agent` routes prompts through that connection to existing Codex daemon sessions and returns their results to the originating channel.
 
-The connector runs on Linux/macOS. MCP, other harness adapters, Windows support, and automatic conversation-close detection are not implemented.
+The connector runs on Linux/macOS. Session-bound MCP tools read Discord history and post updates through the same backend WebSocket. Other harness control adapters, Windows support, and automatic conversation-close detection are not implemented.
 
 ## Install and pair
 
@@ -55,7 +55,7 @@ Codex control is enabled by default. The connector verifies that the thread is a
 
 The daemon must expose its Unix WebSocket control socket and `thread/queue/*` and `thread/settings/update` APIs. The default socket is `$CODEX_HOME/app-server-control/app-server-control.sock` (`CODEX_HOME` defaults to `~/.codex`); use `--codex-socket /absolute/control.sock` for a custom daemon. T3-managed conversations require a separate adapter.
 
-A usable connection returns both `status: registered` and `delivery.ready: true`. Reconnecting the same native thread/workspace/project reuses its Swarm session ID. `connect` saves backend, project, and mode preferences under the workspace's `.swarm/config.json`.
+A fully usable native connection returns `status: registered`, `delivery.ready: true`, and `mcp.ready: true`. Reconnecting the same native thread/workspace/project reuses its Swarm session ID. `connect` saves backend, project, and mode preferences under the workspace's `.swarm/config.json`.
 
 ## Use from Discord
 
@@ -74,9 +74,62 @@ A usable connection returns both `status: registered` and `delivery.ready: true`
 
 Solo permits only the paired Discord owner. Swarm permits any Discord user able to invoke the bot; there is no project-membership or guild scoping yet. Choose Swarm only when that sharing is intended.
 
-`queued` means the local connector accepted the request, not that Codex has started. Requests wait for current work and native queued input to finish. Completion, failure, interruption, or uncertain delivery is posted to the originating channel with the request UUID. Injected requests share the active turn's result and receive output completed after injection.
+`/agent` creates a public receipt containing the full prompt and selected agent before delivery. Results reply to that receipt and include an “In response to” excerpt, so the conversation stays understandable even if the receipt is later deleted. The receipt ID is also included in the native prompt for explicit MCP replies.
 
-Only agent message text is relayed. Approvals and questions stay in the local Codex UI. Output is bounded to 16,000 characters, may shrink further to fit the wire limit, and is split into Discord-sized messages with mentions disabled. Model catalogs describe capabilities; they do not guarantee account entitlement.
+`queued` means the local connector accepted the request, not that Codex has started. Requests wait for current work and native queued input to finish. Completion, failure, interruption, or uncertain delivery is posted to the originating channel with the request UUID. Injected requests share the active turn's result and receive output completed after injection. When the native CLI consumes a queued prompt before Swarm starts it, the connector adopts the turn using the exact request/client ID instead of reporting a false delivery failure. Genuine uncertainty still requires checking local Codex before resending. During a rolling backend upgrade, successful responses without a prompt receipt carry a quoted prompt excerpt in the message body.
+
+Final agent text is relayed automatically; messages explicitly marked `commentary` stay local. Older daemon messages without phase metadata retain the previous relay behavior. Approvals stay in the local Codex UI. Output is bounded to 16,000 characters, may shrink further to fit the wire limit, and is split into Discord-sized messages with mentions disabled. Model catalogs describe capabilities; they do not guarantee account entitlement.
+
+## Give the harness Discord MCP tools
+
+Native Codex setup is automatic in `swarm connect`. After pairing, the connector:
+
+1. Verifies and registers the existing native conversation.
+2. Adds its `swarm` stdio server to Codex configuration through the daemon's config API, preserving other servers and settings.
+3. Calls `config/mcpServer/reload` to refresh the loaded conversation without restarting the harness.
+4. Checks the thread's live tool inventory and calls `swarm_status` through that MCP connection to verify the correct attachment and backend.
+
+A successful result includes `mcp.ready: true`. No extra pairing code, user config edit, or harness restart is needed. This requires the native daemon's config, live MCP reload, status, and tool-call APIs. If any stage fails, `connect` reports an explicit MCP error and exits nonzero; prompt delivery can remain registered, but MCP is not reported ready. An unrelated server already named `swarm` is preserved and reported as `mcp_config_conflict`.
+
+The automatic server uses `swarm mcp --auto`: Codex supplies `_meta.threadId` on each tool call. The local connector selects exactly one matching native attachment across its backends. Missing identity, multiple matching registrations, and disconnected attachments fail explicitly; the server never guesses from the workspace or last connected agent. This keeps multiple conversations in one workspace separate. Disconnecting a registration immediately removes its chat access; the shared MCP configuration can stay installed for later connections.
+
+For metadata-only attachments or another harness, **manual stdio setup** is still available with an explicit binding. Replace the paths, backend, and Swarm session ID returned by `connect`:
+
+```json
+{
+  "mcpServers": {
+    "swarm": {
+      "command": "/absolute/path/to/Swarm/Client/.venv/bin/swarm",
+      "args": [
+        "mcp", "--backend", "http://localhost:5142",
+        "--workspace", "/absolute/project",
+        "--session", "<swarm-session-uuid>"
+      ]
+    }
+  }
+}
+```
+
+For manual setup, the surrounding config format depends on the harness; `command` and `args` above are the stdio process settings. `swarm serve` must already be running. A custom home goes before the subcommand: `swarm --home /path mcp …`. This process neither starts another harness nor opens another backend connection. Each tool call follows **harness → stdio MCP → private connector socket → existing authenticated backend WebSocket → Discord**, with replies correlated over the same path.
+
+Instead of `--session`, use `--harness-session-id <native-thread-id>` plus `--workspace`, or let MCP inherit `CODEX_THREAD_ID` from native Codex. This resolves exactly one local attachment for that backend; missing or ambiguous attachments fail. Explicit session bindings must be refreshed after a connector restart and reattachment. Backend and workspace can use the preferences saved by `connect`. Metadata-only attachments can use MCP too; receiving Discord prompts still requires a supported control adapter.
+
+| Tool | Use |
+| --- | --- |
+| `swarm_status()` | Verify the calling attachment and backend connection without posting to Discord. |
+| `discord_get_channel(channel_id)` | Inspect the destination, including whether it is a thread and its parent channel. |
+| `discord_read_messages(channel_id, limit=20, before_message_id=None)` | Read up to 50 messages, oldest first, with author IDs, timestamps, reply IDs, and attachment links. Use `nextBeforeMessageId` to read older history. |
+| `discord_send_message(channel_id, content, reply_to_message_id=None)` | Post up to 1,800 characters to that channel or thread, optionally replying to a message in it. Returns the posted message URL. |
+
+A Discord thread has its own channel ID: pass that thread ID to post inside it. Incoming `/agent` prompts now carry the originating channel/thread ID and Swarm session ID. For another destination, supply its Discord ID (Copy Channel ID with Discord Developer Mode). Channels and threads already exist; these tools do not create them or subscribe to live message events. Read history again when more context is needed.
+
+The backend derives attribution from the authenticated session, disables mentions, and checks the paired owner's current guild/channel permissions on every call. Private threads also require membership or thread-management access. The bot must have its own View Channel, Read Message History, Send Messages, Send Messages in Threads, and Embed Links permissions as appropriate. DMs and posting to archived/locked threads are unsupported. Project labels do not restrict chat access: MCP can address guild channels available to both the paired owner and bot. In Swarm mode, people who can prompt that session can influence its use of these tools.
+
+Both explicit MCP posts and automatic results have a Discord embed footer beneath the message body. It identifies the agent display name, paired Discord owner (name and user ID), harness, project, machine (name and ID), Swarm session UUID, and destination channel/thread (name and ID). Automatic results also include the request UUID, status, and part number when split across messages. These fields come from backend session metadata, not agent-supplied text. Request attribution is captured at submission and survives session renames or disconnection; unavailable Discord name lookups fall back to IDs. Chat history exposes the embed footer as `footer` so agents can distinguish messages from different sessions using the same bot.
+
+For ordinary message text, enable **Message Content Intent** under the application's **Bot → Privileged Gateway Intents** settings in the Discord Developer Portal (and obtain approval if Discord requires it). History tools use REST: Discord's application-level access controls whether REST returns human message content, independently of the intents requested by the Gateway connection. Without that access, human content and attachment fields can be empty while authors, timestamps, and the bot's own message text remain visible. After saving the portal setting, retry the history read; no MCP or harness restart is needed. The separate backend flag `Discord__ReadMessageContent=true` requests message content for Gateway events on backend startup; it does not grant REST access. See [Discord's HTTP and message content restrictions](https://docs.discord.com/developers/events/gateway#http-restrictions).
+
+Keep detailed implementation, logs, and approvals inside the harness. Use MCP for chosen shared progress, questions, and results; posting a question does not itself wait for a reply or resume work. Further instructions can arrive through `/agent`. Automatic final-answer relay remains enabled, so avoid repeating a full MCP update in the final answer. Sends are never replayed after reconnect or retried by Swarm. If a send returns `chat_delivery_unknown_check_discord`, inspect history before considering another send.
 
 ## Operate and troubleshoot
 
@@ -91,6 +144,8 @@ swarm disconnect --backend http://localhost:5142 --session <swarm-session-id>
 | Symptom | Check or action |
 | --- | --- |
 | Empty Discord session picker | Check `registration.control` and `delivery.ready`. Metadata-only sessions are hidden. Solo also requires the paired Discord account. |
+| `mcp_live_reload_unavailable` / `mcp_config_unavailable` | Native daemon lacks the required live setup API; MCP readiness remains false. Diagnose/update that adapter instead of claiming it is connected. |
+| `mcp_config_conflict` | Another `swarm` MCP entry exists; the connector preserves it. Inspect that entry before deciding how to resolve the conflict. |
 | `pairing_required` | Pair again. Backend credentials are held in memory and are lost on backend restart. |
 | `codex_session_not_loaded_on_daemon` | Connect the actual live conversation on the correct daemon; do not resume its history in another process. |
 | `codex_unavailable_check_daemon_socket` | Check the daemon and its socket path. The control socket requires a WebSocket handshake. |
@@ -120,6 +175,6 @@ dotnet run --project Backend/Swarm.Server.Tests
 Client/.venv/bin/python -m unittest discover -s Client/tests -v
 ```
 
-The tests exercise the real ASP.NET controllers and shared connector using a Unix-socket WebSocket Codex fixture, without Discord credentials or inference calls. They cover ownership, multiplexing, queue/inject races, duplicate requests, reconnect, cancellation, and correlated results. The fixture's simulated Discord approval endpoint is absent from production.
+The tests exercise the real ASP.NET controllers, shared connector, and stdio MCP process using a Unix-socket WebSocket Codex fixture, without Discord credentials or inference calls. They cover ownership, multiplexing, queue/inject races, duplicate requests, reconnect, cancellation, correlated results, chat history, channel/thread replies, and uncertain send handling. Discord REST checks use a fake HTTP handler to verify permission denials, private-thread membership, reply references, mentions, and history ordering. Test-only Discord endpoints are absent from production.
 
 Live transport checks used Codex daemon 0.167.0. Discord-to-Codex prompting was also confirmed manually. Real account access and local approval interaction still depend on the user's Codex configuration.

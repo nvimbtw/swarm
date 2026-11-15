@@ -12,6 +12,7 @@ from . import __version__
 from .backend import BackendError, BackendLink
 from .codex import CodexAdapter
 from .codex_rpc import CodexError, CodexRpc
+from .mcp_setup import ensure_mcp
 from .protocol import MAX_MESSAGE_BYTES, MAX_SESSIONS
 from .storage import Storage, backend_origin
 
@@ -36,6 +37,17 @@ class Connector:
                     "backends": [{"backend": origin, "state": link.state,
                                   "sessions": list(link.sessions.values())}
                                  for origin, link in self.links.items()]}
+        if operation in {"chat", "mcp-status"} and request.get("auto"):
+            native_id = request.get("harness_session_id")
+            if not native_id:
+                raise BackendError("mcp_thread_identity_missing")
+            matches = [(link, session) for link in self.links.values() for session in link.sessions.values()
+                       if session.get("harness_session_id") == native_id and
+                       session["registration"]["harness"] == "codex"]
+            if len(matches) != 1:
+                raise BackendError("mcp_session_missing_or_ambiguous")
+            link, session = matches[0]
+            return await self.chat(link, {**request, "session_id": session["registration"]["sessionId"]})
         origin = backend_origin(request["backend"])
         if operation == "pair-start":
             if len(self.pairings) >= 50:
@@ -67,7 +79,10 @@ class Connector:
             return {"status": "pairing_required", "backend": origin}
         link = self.get_link(origin)
         if operation == "connect":
-            return await self.connect_session(link, request)
+            result = await self.connect_session(link, request)
+            session = result["session"]
+            await self.setup_mcp(link, session)
+            return {**result, "status": session["state"], "mcp": session["mcp"]}
         if operation == "disconnect":
             async with link.lock:
                 session = link.sessions.pop(request["session_id"], None)
@@ -81,7 +96,62 @@ class Connector:
                 return {"status": "disconnected", "removed": session is not None}
         if operation == "sessions":
             return await link.request("session.list")
+        if operation in {"chat", "mcp-status"}:
+            return await self.chat(link, request)
         raise ValueError("Unknown operation")
+
+    async def setup_mcp(self, link, session):
+        if not session["registration"].get("control"):
+            session["mcp"] = {"ready": False, "state": "manual_setup"}
+            return
+        session["mcp"] = {"ready": False, "state": "pending"}
+        for _ in range(50):
+            if session["state"] != "pending" or link.state == "pairing_required":
+                break
+            await asyncio.sleep(0.1)
+        if session["state"] != "registered":
+            return
+        try:
+            async with asyncio.timeout(25):
+                adapter = self.adapters[session["codex_socket"]]
+                async with adapter.mcp_lock:
+                    session["mcp"] = await ensure_mcp(adapter.rpc, self.storage.home, session)
+        except (CodexError, TimeoutError, OSError, ValueError, KeyError, TypeError) as error:
+            code = str(error) if isinstance(error, CodexError) else "mcp_setup_failed"
+            session["mcp"] = {"ready": False, "state": "failed", "error": code}
+
+    async def chat(self, link, request):
+        # MCP is bound to one attachment, never an arbitrary session supplied by a tool call.
+        session_id = request.get("session_id")
+        if session_id:
+            session = link.sessions.get(session_id)
+        else:
+            candidates = [s for s in link.sessions.values()
+                          if request.get("harness_session_id") and
+                          s.get("harness_session_id") == request["harness_session_id"] and
+                          s["workspace"] == request.get("workspace")]
+            if len(candidates) != 1:
+                raise BackendError("mcp_session_missing_or_ambiguous")
+            session = candidates[0]
+        if not session or session["state"] != "registered":
+            raise BackendError("session_not_registered")
+        if request.get("operation") == "mcp-status":
+            return {"status": "ok", "backend": link.origin, "connection": link.state,
+                    "session": session["registration"]}
+        kind = request["kind"]
+        if kind not in {"discord.channel", "discord.read", "discord.send"}:
+            raise BackendError("invalid_chat_operation")
+        payload = {key: request[key] for key in
+                   ("channelId", "content", "replyToMessageId", "limit", "beforeMessageId") if key in request}
+        payload["sessionId"] = session["registration"]["sessionId"]
+        try:
+            response = await link.request(kind, payload)
+            return {"status": "ok", **response["payload"]}
+        except (BackendError, TimeoutError, aiohttp.ClientError, OSError) as error:
+            if kind == "discord.send" and (not isinstance(error, BackendError) or
+                    str(error) in {"connection_lost", "chat_delivery_unknown_check_discord"}):
+                raise BackendError("chat_delivery_unknown_check_discord") from None
+            raise
 
     async def connect_session(self, link, request):
         async with link.lock:

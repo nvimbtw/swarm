@@ -27,17 +27,21 @@ public sealed class AgentDiscordPublisher(RestClient rest, ILogger<AgentDiscordP
         _stoppingToken = stoppingToken;
         await foreach (var (destination, update) in _updates.Reader.ReadAllAsync(stoppingToken))
         {
-            var content = $"Agent request `{update.RequestId}` · session `{update.SessionId}` · {update.Status}";
-            if (!string.IsNullOrEmpty(update.Error)) content += $"\n{update.Error}";
-            if (!string.IsNullOrEmpty(update.Output)) content += $"\n\n{update.Output}";
+            var content = AgentMessagePresentation.ResultText(update);
             try
             {
-                for (int offset = 0; offset < content.Length; offset += 1800)
-                    await rest.SendMessageAsync(destination.ChannelId, new MessageProperties
-                    {
-                        Content = content.Substring(offset, Math.Min(1800, content.Length - offset)),
-                        AllowedMentions = AllowedMentionsProperties.None
-                    }, cancellationToken: stoppingToken);
+                var agent = destination.Agent ?? throw new InvalidOperationException("Missing server attribution");
+                var context = await AgentMessagePresentation.ResolveAsync(rest, agent, destination.ChannelId, stoppingToken);
+                var parts = AgentMessagePresentation.Split(content);
+                for (int index = 0; index < parts.Count; index++)
+                {
+                    var properties = AgentMessagePresentation.Create(
+                        parts[index], agent, destination.ChannelId, context, update.RequestId, update.Status,
+                        index + 1, parts.Count, destination.Prompt);
+                    if (destination.PromptMessageId is { } receiptId)
+                        properties.MessageReference = MessageReferenceProperties.Reply(receiptId, failIfNotExists: false);
+                    await rest.SendMessageAsync(destination.ChannelId, properties, cancellationToken: stoppingToken);
+                }
             }
             catch (Exception error) when (error is not OperationCanceledException)
             {

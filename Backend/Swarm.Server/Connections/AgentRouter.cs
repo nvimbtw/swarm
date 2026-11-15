@@ -64,6 +64,8 @@ public sealed class AgentRouter(SessionRegistry registry, IAgentEventSink sink, 
             throw new AgentRequestException("session_offline");
 
         var requestId = Guid.NewGuid();
+        // Preserve the authenticated identity even if this session is renamed or disconnected before completion.
+        destination = destination with { Agent = AgentAttribution.FromSession(session), Prompt = request?.Prompt };
         var pending = new PendingRequest(session.ConnectionId, sessionId, destination,
             new(TaskCreationOptions.RunContinuationsAsynchronously), DateTimeOffset.UtcNow, request is not null);
         await TrackRequestAsync(requestId, pending, ct);
@@ -88,6 +90,7 @@ public sealed class AgentRouter(SessionRegistry registry, IAgentEventSink sink, 
                     sessionId,
                     senderId,
                     channelId = destination.ChannelId.ToString(),
+                    promptMessageId = destination.PromptMessageId?.ToString(),
                     prompt = request?.Prompt,
                     delivery = request?.Delivery,
                     model = request?.Model,

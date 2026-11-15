@@ -12,6 +12,7 @@ If `swarm` is unavailable, resolve this skill's source path to the Swarm checkou
 | `pair-complete` | `--backend <origin> --code-stdin`. Feed the eight-digit Discord code through stdin, never a command-line argument. |
 | `connect` | `--harness codex --workspace <absolute-path> --backend <origin> --project <label>`, with optional `--name`, `--mode solo\|swarm`, `--harness-session-id`, and `--codex-socket`. |
 | `sessions` | `--backend <origin>`. Queries backend registrations owned by the paired Discord account. |
+| `mcp` | Starts a stdio MCP server using `--backend`, `--workspace`, and either `--session <swarm-session-id>` or `--harness-session-id <native-id>` (defaults to `CODEX_THREAD_ID`). Requires the existing service and a registered attachment. Native controlled `connect` installs `mcp --auto` automatically; manual bindings are for other harnesses. |
 | `disconnect` | `--backend <origin> --session <swarm-session-id>`. Removes only that attachment. |
 
 `connect` saves backend, project, and mode preferences in the workspace's `.swarm/config.json`. Later commands can reuse those settings; use `--workspace` when operating elsewhere. A project is currently a label, not an authorization boundary.
@@ -22,12 +23,14 @@ A control failure must be diagnosed, not silently downgraded. Explicit `--regist
 
 | State | Interpretation |
 | --- | --- |
-| `registered` + `delivery.ready: true` | Backend acknowledgment and verified Discord control. |
+| `registered` + `delivery.ready: true` | Backend acknowledgment and verified Discord control; full chat readiness also requires `mcp.ready: true`. |
 | `registered` + `delivery.state: registration_only` | Metadata only; hidden from `/agent`. |
 | `pending` | Waiting for backend registration. Do not report it as connected. |
 | `pairing_required` | Discord verification is needed. Pairing expires after five minutes with five incorrect attempts allowed. |
 | `rejected` | Backend refused registration. |
 | `authenticated` | Credential issuance succeeded; no session registration is implied. |
+
+MCP calls use the existing shared backend WebSocket and check the paired owner’s Discord permissions; they do not start another harness. Channel and thread IDs come from incoming `/agent` prompt context or an explicit destination. Keep detailed work local and use MCP for concise shared updates. Native controlled `connect` installs and refreshes MCP through the existing daemon, then verifies `mcp.ready`. No separate MCP pairing, manual config edit, or harness restart is required on a supported daemon. Metadata-only/other harness sessions can use [manual MCP setup](../../../Client/README.md#give-the-harness-discord-mcp-tools).
 
 Solo permits only the paired owner. Swarm permits other Discord users able to invoke the bot, without project/guild scoping. `/agent` queues by default; explicit Inject requires an active turn and rejects model/reasoning changes. Explicit settings persist in Codex, results return to the originating Discord channel, and approvals stay local.
 

@@ -9,12 +9,14 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import AsyncMock
 
 import aiohttp
 
 from swarm_client.cli import rpc
 from swarm_client.storage import backend_origin
-from swarm_client.backend import BackendLink
+from swarm_client.backend import BackendError, BackendLink
+from swarm_client.service import Connector
 from fixtures.codex_daemon import CodexDaemon
 
 
@@ -33,6 +35,22 @@ class ConfigurationTests(unittest.TestCase):
 
 
 class IncomingRequestTests(unittest.IsolatedAsyncioTestCase):
+    async def test_results_keep_prompt_context_when_backend_has_no_public_receipt(self):
+        class Socket:
+            closed = False
+            def __init__(self): self.messages = []
+            async def send_str(self, value): self.messages.append(json.loads(value))
+        ws = Socket()
+        link = BackendLink.__new__(BackendLink)
+        link.ws, link.send_lock = ws, asyncio.Lock()
+        request = {"requestId": str(uuid.uuid4()), "sessionId": str(uuid.uuid4()), "prompt": "Run tests\nThen explain"}
+        update = {"status": "completed", "output": "All tests passed."}
+        await link.publish_agent_update(ws, request, update)
+        self.assertIn("> Run tests\n> Then explain", ws.messages[-1]["payload"]["output"])
+        await link.publish_agent_update(ws, {**request, "promptMessageId": "789"}, update)
+        self.assertEqual(ws.messages[-1]["payload"]["output"], "All tests passed.")
+        self.assertEqual(update["output"], "All tests passed.")
+
     async def test_duplicate_requests_share_one_submission(self):
         class Adapter:
             calls = 0
@@ -60,6 +78,36 @@ class IncomingRequestTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(adapter.calls, 1)
         self.assertEqual(len(ws.messages), 2)
         self.assertEqual(ws.messages[0], ws.messages[1])
+
+
+class ChatRequestTests(unittest.IsolatedAsyncioTestCase):
+    async def test_ambiguous_native_binding_is_rejected(self):
+        sessions = {str(i): {"workspace": "/project", "harness_session_id": "native",
+                             "state": "registered", "registration": {"sessionId": str(i)}} for i in range(2)}
+        link = SimpleNamespace(sessions=sessions, request=AsyncMock())
+        connector = Connector(None, None)
+        with self.assertRaisesRegex(BackendError, "ambiguous"):
+            await connector.chat(link, {"kind": "discord.read", "channelId": "123",
+                "harness_session_id": "native", "workspace": "/project"})
+        link.request.assert_not_awaited()
+
+    async def test_uncertain_send_is_not_retried_or_rebound(self):
+        link = SimpleNamespace(sessions={"one": {"state": "registered", "registration": {"sessionId": "one"}}},
+            request=AsyncMock(side_effect=BackendError("connection_lost")))
+        connector = Connector(None, None)
+        with self.assertRaisesRegex(BackendError, "chat_delivery_unknown_check_discord"):
+            await connector.chat(link, {"session_id": "one", "kind": "discord.send",
+                "channelId": "123", "content": "result", "sessionId": "forged"})
+        link.request.assert_awaited_once_with("discord.send", {
+            "channelId": "123", "content": "result", "sessionId": "one"})
+
+    async def test_auto_binding_rejects_the_same_thread_in_multiple_backends(self):
+        connector = Connector(None, None)
+        session = {"harness_session_id": "native", "registration": {"harness": "codex"}}
+        connector.links = {"first": SimpleNamespace(sessions={"one": session}),
+                           "second": SimpleNamespace(sessions={"two": session})}
+        with self.assertRaisesRegex(BackendError, "ambiguous"):
+            await connector.dispatch({"operation": "mcp-status", "auto": True, "harness_session_id": "native"})
 
 
 @unittest.skipUnless(FIXTURE.exists(), "Build Backend/Swarm.Server.Tests first")
@@ -258,6 +306,7 @@ class ConnectorIntegrationTests(unittest.IsolatedAsyncioTestCase):
         code, controlled = await cli()
         self.assertEqual(code, 0, controlled)
         self.assertTrue(controlled["delivery"]["ready"])
+        self.assertTrue(controlled["mcp"]["ready"], controlled)
         self.assertTrue(controlled["session"]["registration"]["control"])
         self.assertEqual(controlled["session"]["harness_session_id"], thread_id)
         code, missing_id = await cli(thread_env=None)
@@ -269,6 +318,68 @@ class ConnectorIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(metadata["delivery"]["state"], "registration_only")
         self.assertEqual(metadata["session"]["registration"]["sessionId"],
                          controlled["session"]["registration"]["sessionId"])
+
+    async def test_stdio_mcp_reads_and_replies_over_the_registered_socket(self):
+        from mcp import ClientSession, StdioServerParameters
+        from mcp.client.stdio import stdio_client
+
+        await self.pair()
+        thread_id = str(uuid.uuid4())
+        connected = await self.call("connect", name="chat-agent", project="swarm", harness="codex",
+            mode="solo", workspace=self.temp.name, harness_session_id=thread_id, control=True)
+        session_id = connected["session"]["registration"]["sessionId"]
+        await self.eventually(lambda s: s["backends"][0]["sessions"][0]["state"] == "registered")
+        original_connection = (await self.call("sessions"))["payload"][0]["connectionId"]
+        params = StdioServerParameters(command=sys.executable, args=["-m", "swarm_client.cli",
+            "--home", str(self.home), "mcp", "--backend", self.origin,
+            "--workspace", self.temp.name, "--harness-session-id", thread_id])
+        async with stdio_client(params) as (reader, writer):
+            async with ClientSession(reader, writer) as mcp:
+                await mcp.initialize()
+                names = {tool.name for tool in (await mcp.list_tools()).tools}
+                self.assertEqual(names, {"swarm_status", "discord_get_channel", "discord_read_messages", "discord_send_message"})
+
+                async def tool(name, **arguments):
+                    result = await mcp.call_tool(name, arguments)
+                    self.assertFalse(result.isError, result)
+                    return json.loads(result.content[0].text)
+
+                channel = await tool("discord_get_channel", channel_id="456")
+                self.assertTrue(channel["isThread"])
+                reading = asyncio.create_task(tool("discord_read_messages", channel_id="456", limit=2))
+                # Agent acknowledgments and CLI calls still flow during a pending Discord read.
+                async with self.http.post(self.origin + "/test/agent/discord-test-owner", json={
+                    "sessionId": session_id, "prompt": "Keep working in the harness"}) as response:
+                    self.assertEqual((await response.json())["status"], "queued")
+                page = await reading
+                self.assertEqual([m["id"] for m in page["messages"]], ["4", "5"])
+                self.assertIn("🌍", page["messages"][0]["content"])
+                older = await tool("discord_read_messages", channel_id="456", limit=2,
+                    before_message_id=page["nextBeforeMessageId"])
+                self.assertEqual([m["id"] for m in older["messages"]], ["2", "3"])
+                sent = await tool("discord_send_message", channel_id="456", content="Tests passed 🌍",
+                    reply_to_message_id="5")
+                self.assertEqual(sent["url"], "https://discord.com/channels/1/456/900")
+                await tool("discord_send_message", channel_id="123", content="General update")
+                denied = await mcp.call_tool("discord_read_messages", {"channel_id": "789"})
+                self.assertTrue(denied.isError)
+                self.assertIn("discord_access_denied", denied.content[0].text)
+                invalid = await mcp.call_tool("discord_send_message", {"channel_id": "123", "content": "x" * 1801})
+                self.assertTrue(invalid.isError)
+                await self.call("disconnect", session_id=session_id)
+                offline = await mcp.call_tool("discord_send_message", {"channel_id": "123", "content": "too late"})
+                self.assertTrue(offline.isError)
+        async with self.http.get(self.origin + "/test/chat-sent") as response:
+            sent_messages = await response.json()
+        self.assertEqual(len(sent_messages), 2)
+        self.assertEqual(sent_messages[0]["replyTo"], "5")
+        self.assertEqual(sent_messages[0]["attribution"]["sessionId"], session_id)
+        self.assertEqual(sent_messages[0]["attribution"]["agentName"], "chat-agent")
+        self.assertEqual(sent_messages[0]["attribution"]["ownerId"], "discord-test-owner")
+        self.assertEqual(sent_messages[0]["content"], "Tests passed 🌍")
+        async with self.http.get(self.origin + "/diagnostics") as response:
+            connections = (await response.json())["activeConnections"]
+        self.assertEqual([c["id"] for c in connections], [original_connection])
 
     async def test_cli_saves_project_preferences_without_credentials(self):
         await self.pair()
@@ -302,6 +413,83 @@ class ConnectorIntegrationTests(unittest.IsolatedAsyncioTestCase):
         removed = await cli("disconnect", "--workspace", str(workspace), "--session",
                             result["session"]["registration"]["sessionId"])
         self.assertTrue(removed["removed"])
+
+    async def test_connect_automatically_installs_mcp_and_routes_each_calling_thread(self):
+        await self.pair()
+        sessions = []
+        for index in range(2):
+            native = str(uuid.uuid4())
+            connected = await self.call("connect", name=f"auto-{index}", project="swarm", harness="codex",
+                mode="solo", workspace=self.temp.name, harness_session_id=native, control=True)
+            self.assertTrue(connected["mcp"]["ready"], connected)
+            sessions.append((native, connected["session"]["registration"]["sessionId"]))
+        self.assertEqual(self.daemon.mcp_config["unrelated"], {"command": "preserve-me"})
+        calls = [json.loads(line) for line in (Path(self.temp.name) / "calls.jsonl").read_text().splitlines()]
+        self.assertEqual(sum(c["method"] == "config/value/write" for c in calls), 1)
+        self.assertTrue(any(c["method"] == "config/mcpServer/reload" for c in calls))
+        for native, session_id in sessions:
+            result = await self.daemon.mcp_request(native, "call", {"tool": "swarm_status", "_meta": {"threadId": native}})
+            self.assertFalse(result.get("isError"), result)
+            self.assertEqual(json.loads(result["content"][0]["text"])["session"]["sessionId"], session_id)
+            result = await self.daemon.mcp_request(native, "call", {"tool": "discord_send_message",
+                "arguments": {"channel_id": "123", "content": "My own update"}, "_meta": {"threadId": native}})
+            self.assertFalse(result.get("isError"), result)
+        missing = await self.daemon.mcp_request(sessions[0][0], "call", {"tool": "swarm_status"})
+        self.assertTrue(missing["isError"])
+        self.assertIn("mcp_thread_identity_missing", missing["content"][0]["text"])
+        async with self.http.get(self.origin + "/test/chat-sent") as response:
+            posts = await response.json()
+        self.assertEqual([p["attribution"]["sessionId"] for p in posts], [s[1] for s in sessions])
+
+    async def test_mcp_setup_failures_preserve_delivery_and_existing_config(self):
+        await self.pair()
+        self.daemon.mcp_config["swarm"] = {"command": "someone-elses-server"}
+        conflict = await self.call("connect", name="conflict", project="swarm", harness="codex", mode="solo",
+            workspace=self.temp.name, harness_session_id=str(uuid.uuid4()), control=True)
+        self.assertEqual(conflict["status"], "registered")
+        self.assertEqual(conflict["mcp"]["error"], "mcp_config_conflict")
+        self.assertEqual(self.daemon.mcp_config["swarm"], {"command": "someone-elses-server"})
+        del self.daemon.mcp_config["swarm"]
+        (Path(self.temp.name) / "no-mcp-reload").touch()
+        unsupported = await self.call("connect", name="old-daemon", project="swarm", harness="codex", mode="solo",
+            workspace=self.temp.name, harness_session_id=str(uuid.uuid4()), control=True)
+        self.assertEqual(unsupported["status"], "registered")
+        self.assertEqual(unsupported["mcp"]["error"], "mcp_live_reload_unavailable")
+        self.assertFalse(unsupported["mcp"]["ready"])
+        process = await asyncio.create_subprocess_exec(sys.executable, "-m", "swarm_client.cli",
+            "--home", str(self.home), "connect", "--backend", self.origin, "--workspace", self.temp.name,
+            "--project", "swarm", "--harness", "codex", "--harness-session-id", str(uuid.uuid4()),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        output, error = await process.communicate()
+        self.assertFalse(error, error.decode())
+        self.assertEqual(process.returncode, 1)
+        self.assertEqual(json.loads(output)["mcp"]["error"], "mcp_live_reload_unavailable")
+
+    async def test_cli_consumed_discord_request_completes_with_original_prompt_context(self):
+        await self.pair()
+        (Path(self.temp.name) / "cli-start-race").touch()
+        (Path(self.temp.name) / "history-only").touch()
+        connected = await self.call("connect", name="queue-agent", project="swarm", harness="codex", mode="solo",
+            workspace=self.temp.name, harness_session_id=str(uuid.uuid4()), control=True)
+        session_id = connected["session"]["registration"]["sessionId"]
+        prompt = "Explain the test failure 🌍"
+        async with self.http.post(self.origin + "/test/agent/discord-test-owner", json={
+                "sessionId": session_id, "prompt": prompt}) as response:
+            accepted = await response.json()
+        self.assertEqual(accepted["status"], "queued")
+        for _ in range(100):
+            async with self.http.get(self.origin + "/test/agent-events") as response:
+                events = await response.json()
+            matching = [e for e in events if e["update"]["requestId"] == accepted["requestId"]]
+            if any(e["update"]["status"] == "completed" for e in matching):
+                break
+            await asyncio.sleep(.05)
+        else:
+            self.fail(str(events))
+        self.assertFalse(any(e["update"]["status"] == "unknown" for e in matching))
+        completed = next(e for e in matching if e["update"]["status"] == "completed")
+        self.assertEqual(completed["destination"]["prompt"], prompt)
+        self.assertIn(prompt, completed["update"]["output"])
 
 
 if __name__ == "__main__":

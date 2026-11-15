@@ -40,6 +40,7 @@ class CodexRpc:
         self.reader = None
         self.turns = {}
         self.watched = set()
+        self.requests = {}
 
     async def connect(self):
         async with self.lock:
@@ -126,9 +127,19 @@ class CodexRpc:
             return
         key = (thread_id, turn_id)
         record = self.track_turn(thread_id, turn_id)
+        items = params.get("turn", {}).get("items", [])
+        if params.get("item"):
+            items = [*items, params["item"]]
+        for item in items:
+            request_key = (thread_id, item.get("clientId"))
+            if item.get("type") == "userMessage" and request_key in self.requests:
+                self.requests[request_key] = turn_id
         if method == "item/completed" and params.get("item", {}).get("type") == "agentMessage":
             item = params["item"]
-            record.messages[item["id"]] = item.get("text", "")[:MAX_OUTPUT_CHARS]
+            # Progress narration belongs in the harness. Agents explicitly choose
+            # shared updates through MCP; the automatic relay retains final answers.
+            if item.get("phase") != "commentary":
+                record.messages[item["id"]] = item.get("text", "")[:MAX_OUTPUT_CHARS]
             # Bound output memory, including very long or tool-heavy turns.
             if len(record.messages) > 20:
                 record.messages.pop(next(iter(record.messages)))
@@ -140,6 +151,13 @@ class CodexRpc:
                 if old_key != key and self.turns[old_key].completed.is_set():
                     self.turns.pop(old_key)
                     break
+
+    def hydrate_turn(self, thread_id, turn):
+        """Recover only assistant text and exact request IDs from a display summary."""
+        for item in turn.get("items", []):
+            self.notification("item/completed", {"threadId": thread_id, "turnId": turn["id"], "item": item})
+        if turn["status"] in {"completed", "failed", "interrupted"}:
+            self.notification("turn/completed", {"threadId": thread_id, "turn": turn})
 
     async def close(self):
         if self.reader:

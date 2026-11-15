@@ -67,4 +67,10 @@ public sealed class SessionRegistry(SessionRepository data)
     {
         lock (_gate) return _sessions.Values.Where(x => x.Identity.OwnerId == ownerId).ToArray();
     }
+
+    public RegisteredSession? FindConnected(Guid connectionId, Guid sessionId)
+    {
+        lock (_gate) return _sessions.TryGetValue(sessionId, out var session) &&
+            session.ConnectionId == connectionId ? session : null;
+    }
 }
