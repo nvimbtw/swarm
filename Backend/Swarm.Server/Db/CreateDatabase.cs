@@ -25,6 +25,7 @@ public class CreateDatabase(DatabaseService database)
 
         await ExecuteAsync(connection, Swarm.Server.Classi.WorkRequest.CreateTableSql());
         await ExecuteAsync(connection, Swarm.Server.Classi.RequestEvent.CreateTableSql());
+        await WorkspaceSchema.InitializeAsync(connection);
     }
 
     private static async Task ExecuteAsync(SqliteConnection connection, string sql)
