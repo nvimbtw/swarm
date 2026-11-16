@@ -15,6 +15,7 @@ from .codex_rpc import CodexError, CodexRpc
 from .mcp_setup import ensure_mcp
 from .protocol import MAX_MESSAGE_BYTES, MAX_SESSIONS
 from .storage import Storage, backend_origin
+from .workspace_tools import WORKSPACE_OPERATIONS, WORKSPACE_FIELDS
 
 
 class Connector:
@@ -37,7 +38,7 @@ class Connector:
                     "backends": [{"backend": origin, "state": link.state,
                                   "sessions": list(link.sessions.values())}
                                  for origin, link in self.links.items()]}
-        if operation in {"chat", "mcp-status"} and request.get("auto"):
+        if operation in {"chat", "workspace", "mcp-status"} and request.get("auto"):
             native_id = request.get("harness_session_id")
             if not native_id:
                 raise BackendError("mcp_thread_identity_missing")
@@ -47,7 +48,7 @@ class Connector:
             if len(matches) != 1:
                 raise BackendError("mcp_session_missing_or_ambiguous")
             link, session = matches[0]
-            return await self.chat(link, {**request, "session_id": session["registration"]["sessionId"]})
+            return await self.session_tool(link, {**request, "session_id": session["registration"]["sessionId"]})
         origin = backend_origin(request["backend"])
         if operation == "pair-start":
             if len(self.pairings) >= 50:
@@ -96,8 +97,8 @@ class Connector:
                 return {"status": "disconnected", "removed": session is not None}
         if operation == "sessions":
             return await link.request("session.list")
-        if operation in {"chat", "mcp-status"}:
-            return await self.chat(link, request)
+        if operation in {"chat", "workspace", "mcp-status"}:
+            return await self.session_tool(link, request)
         raise ValueError("Unknown operation")
 
     async def setup_mcp(self, link, session):
@@ -120,7 +121,7 @@ class Connector:
             code = str(error) if isinstance(error, CodexError) else "mcp_setup_failed"
             session["mcp"] = {"ready": False, "state": "failed", "error": code}
 
-    async def chat(self, link, request):
+    async def session_tool(self, link, request):
         # MCP is bound to one attachment, never an arbitrary session supplied by a tool call.
         session_id = request.get("session_id")
         if session_id:
@@ -139,10 +140,13 @@ class Connector:
             return {"status": "ok", "backend": link.origin, "connection": link.state,
                     "session": session["registration"]}
         kind = request["kind"]
-        if kind not in {"discord.channel", "discord.read", "discord.send"}:
-            raise BackendError("invalid_chat_operation")
-        payload = {key: request[key] for key in
-                   ("channelId", "content", "replyToMessageId", "limit", "beforeMessageId") if key in request}
+        if kind in WORKSPACE_OPERATIONS:
+            fields = WORKSPACE_FIELDS
+        elif kind in {"discord.channel", "discord.read", "discord.send"}:
+            fields = {"channelId", "content", "replyToMessageId", "limit", "beforeMessageId"}
+        else:
+            raise BackendError("invalid_tool_operation")
+        payload = {key: request[key] for key in fields if key in request}
         payload["sessionId"] = session["registration"]["sessionId"]
         try:
             response = await link.request(kind, payload)
@@ -151,6 +155,9 @@ class Connector:
             if kind == "discord.send" and (not isinstance(error, BackendError) or
                     str(error) in {"connection_lost", "chat_delivery_unknown_check_discord"}):
                 raise BackendError("chat_delivery_unknown_check_discord") from None
+            if kind in WORKSPACE_OPERATIONS and kind.rsplit(".", 1)[1] in {"create", "update", "delete"}:
+                if not isinstance(error, BackendError) or str(error) == "connection_lost":
+                    raise BackendError("workspace_delivery_unknown_read_before_retry") from None
             raise
 
     async def connect_session(self, link, request):

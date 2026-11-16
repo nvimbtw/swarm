@@ -34,6 +34,6 @@ MCP calls use the existing shared backend WebSocket and check the paired ownerâ€
 
 Solo permits only the paired owner. Swarm permits other Discord users able to invoke the bot, without project/guild scoping. `/agent` queues by default; explicit Inject requires an active turn and rejects model/reasoning changes. Explicit settings persist in Codex, results return to the originating Discord channel, and approvals stay local.
 
-Service restarts lose attachments/waiting requests but retain credentials; backend restarts invalidate credentials. Updating files does not reload the service: check its running version, restart only when active work will not be disturbed, then reattach. Disconnect explicitly when finished; conversation-close detection is not implemented. After uncertain delivery, check local Codex before resending.
+Service restarts lose attachments/waiting requests but retain credentials; backend restarts retain SQLite credentials but discard live request correlation. Updating files does not reload the service: check its running version, restart only when active work will not be disturbed, then reattach. Disconnect explicitly when finished; conversation-close detection is not implemented. After uncertain delivery, check local Codex before resending.
 
 See [connector setup and troubleshooting](../../../Client/README.md) and [protocol details](../../../Client/docs/protocol.md).
