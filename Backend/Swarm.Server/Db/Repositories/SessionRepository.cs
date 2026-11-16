@@ -43,6 +43,14 @@ public sealed class SessionRepository(DatabaseService database)
             ("$harness", harnessId), ("$name", request.Name), ("$project", request.ProjectId),
             ("$control", request.Control ? 1 : 0), ("$mode", request.Mode), ("$now", now));
 
+        await DatabaseQueries.ExecuteAsync(connection, transaction, """
+            UPDATE Session SET WorkspaceProjectID=(
+                SELECT p.ID FROM Project p JOIN Member m ON m.ServerID=p.ServerID
+                WHERE p.Key=$project AND m.UserID=$user AND m.LeftAt IS NULL),
+                OwnerMemberID=(SELECT m.ID FROM Member m JOIN Project p ON p.ServerID=m.ServerID
+                WHERE p.Key=$project AND m.UserID=$user AND m.LeftAt IS NULL)
+            WHERE ID=$id;
+            """, ct, ("$project", request.ProjectId), ("$user", userId), ("$id", request.SessionId.ToString()));
         transaction.Commit();
     }
 

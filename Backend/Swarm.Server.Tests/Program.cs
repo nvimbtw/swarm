@@ -1,3 +1,6 @@
+using Swarm.Server.Db;
+using Swarm.Server.Db.Repositories;
+using Swarm.Server.Workspace;
 using Swarm.Server.Classi;
 using System.Threading.RateLimiting;
 using System.Text.Json;
@@ -15,6 +18,20 @@ if (args.Contains("--serve"))
     var builder = WebApplication.CreateBuilder(args.Where(arg => arg != "--serve").ToArray());
     builder.Logging.ClearProviders();
     builder.WebHost.UseUrls(builder.Configuration["test-url"] ?? "http://127.0.0.1:0");
+    using var hostDatabase = new TestDatabase();
+    await new CreateDatabase(hostDatabase.Database).InitializeAsync();
+    var workspaceConfiguration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+    {
+        ["Workspace:Projects:0:Key"] = "swarm", ["Workspace:Projects:0:GuildId"] = "1",
+        ["Workspace:Projects:0:MemberDiscordIds:0"] = "discord-test-owner"
+    }).Build();
+    await new ProjectProvisioning(hostDatabase.Database).ApplyAsync(workspaceConfiguration);
+    builder.Services.AddSingleton(hostDatabase.Database);
+    builder.Services.AddSingleton<CredentialRepository>();
+    builder.Services.AddSingleton<SessionRepository>();
+    builder.Services.AddSingleton<WorkRequestRepository>();
+    builder.Services.AddSingleton<IWorkspaceRepository, WorkspaceRepository>();
+    builder.Services.AddSingleton<WorkspaceService>();
     builder.Services.AddSingleton(TimeProvider.System);
     builder.Services.AddSingleton<PairingService>();
     builder.Services.AddSingleton<SessionRegistry>();
@@ -79,63 +96,68 @@ Check(commandNames.Contains("swarm-pair"), "Pairing command must be discoverable
 Check(commandNames.Contains("agent"), "Agent command must be discoverable");
 
 var clock = new TestClock();
-var service = new PairingService(clock);
+using var testDatabase = new TestDatabase();
+await new CreateDatabase(testDatabase.Database).InitializeAsync();
+var credentials = new CredentialRepository(testDatabase.Database);
+var sessionData = new SessionRepository(testDatabase.Database);
+var requestData = new WorkRequestRepository(testDatabase.Database);
+var service = new PairingService(clock, credentials);
 var first = service.Start("machine", "Laptop");
-Check(service.Complete(first.PairingId, first.Secret, "00000000") is null, "Must approve through Discord");
+Check(await service.CompleteAsync(first.PairingId, first.Secret, "00000000") is null, "Must approve through Discord");
 var code = service.Approve(first.PairingId, "owner")!;
 Check(service.Approve(first.PairingId, "attacker") is null, "Cannot overwrite the verified Discord owner");
-Check(service.Complete(first.PairingId, "wrong-secret", code.Code) is null, "Code alone cannot claim pairing");
-var issued = service.Complete(first.PairingId, first.Secret, code.Code)!;
-var identity = service.Authenticate(issued.Token)!;
+Check(await service.CompleteAsync(first.PairingId, "wrong-secret", code.Code) is null, "Code alone cannot claim pairing");
+var issued = (await service.CompleteAsync(first.PairingId, first.Secret, code.Code))!;
+var identity = (await service.AuthenticateAsync(issued.Token))!;
 Check(identity.OwnerId == "owner", "Owner comes from Discord");
-Check(service.Complete(first.PairingId, first.Secret, code.Code) is null, "Code is single use");
+Check(await service.CompleteAsync(first.PairingId, first.Secret, code.Code) is null, "Code is single use");
 var exhausted = service.Start("other", "Other");
 var exhaustedCode = service.Approve(exhausted.PairingId, "owner")!;
 for (int attempt = 0; attempt < 5; attempt++)
-    Check(service.Complete(exhausted.PairingId, exhausted.Secret, "wrong") is null, "Wrong code rejected");
-Check(service.Complete(exhausted.PairingId, exhausted.Secret, exhaustedCode.Code) is null, "Five attempts exhaust pairing");
+    Check(await service.CompleteAsync(exhausted.PairingId, exhausted.Secret, "wrong") is null, "Wrong code rejected");
+Check(await service.CompleteAsync(exhausted.PairingId, exhausted.Secret, exhaustedCode.Code) is null, "Five attempts exhaust pairing");
 var expired = service.Start("expired", "Expired");
 var expiredCode = service.Approve(expired.PairingId, "owner")!;
 clock.Now = clock.Now.AddMinutes(6);
-Check(service.Complete(expired.PairingId, expired.Secret, expiredCode.Code) is null, "Expired pairing rejected");
+Check(await service.CompleteAsync(expired.PairingId, expired.Secret, expiredCode.Code) is null, "Expired pairing rejected");
 var replacement = service.Start("machine", "Laptop");
 var replacementCode = service.Approve(replacement.PairingId, "owner")!;
-Check(service.Complete(replacement.PairingId, replacement.Secret, replacementCode.Code) is not null, "Re-pair succeeds");
-Check(service.Authenticate(issued.Token) is null, "Re-pair replaces old installation credential");
+Check(await service.CompleteAsync(replacement.PairingId, replacement.Secret, replacementCode.Code) is not null, "Re-pair succeeds");
+Check(await service.AuthenticateAsync(issued.Token) is null, "Re-pair replaces old installation credential");
 
-var registry = new SessionRegistry();
+var registry = new SessionRegistry(sessionData);
 var connectionA = Guid.NewGuid();
 var connectionB = Guid.NewGuid();
 var registration = new SessionRegistration(Guid.NewGuid(), "A", "project", "codex", "solo");
-registry.Register(connectionA, identity, registration);
-registry.Register(connectionB, identity, registration with { SessionId = Guid.NewGuid(), Name = "B" });
+await registry.RegisterAsync(connectionA, identity, registration);
+await registry.RegisterAsync(connectionB, identity, registration with { SessionId = Guid.NewGuid(), Name = "B" });
 Check(registry.List("stranger").Length == 0, "Session list is owner scoped");
-Check(!registry.Remove(connectionB, registration.SessionId), "Another connection cannot unregister this session");
+Check(!await registry.RemoveAsync(connectionB, registration.SessionId), "Another connection cannot unregister this session");
 bool collisionRejected = false;
-try { registry.Register(connectionB, identity with { MachineId = "another-machine" }, registration); }
+try { await registry.RegisterAsync(connectionB, identity with { MachineId = "another-machine" }, registration); }
 catch (InvalidOperationException) { collisionRejected = true; }
 Check(collisionRejected, "Another installation cannot take over a session ID");
-registry.Disconnect(connectionA);
+await registry.DisconnectAsync(connectionA);
 Check(registry.List("owner").Length == 1, "Disconnect affects only its own sessions");
-registry.Register(connectionA, identity, registration);
-registry.Register(connectionB, identity, registration);
-registry.Disconnect(connectionA);
+await registry.RegisterAsync(connectionA, identity, registration);
+await registry.RegisterAsync(connectionB, identity, registration);
+await registry.DisconnectAsync(connectionA);
 Check(registry.List("owner").Length == 2, "Old transport cleanup cannot remove a reconnected session");
 // Availability and execution share exactly the same authorization predicate.
 var controlled = registration with { SessionId = Guid.NewGuid(), Control = true };
-registry.Register(connectionA, identity, controlled);
+await registry.RegisterAsync(connectionA, identity, controlled);
 Check(registry.Available("owner").Length == 1, "Owner can use controlled Solo session");
 Check(registry.Available("stranger").Length == 0, "Solo session is hidden from other users");
 Check(registry.FindAvailable("stranger", controlled.SessionId) is null, "Forged Solo ID is rejected");
-registry.Register(connectionA, identity, controlled with { Mode = "swarm" });
+await registry.RegisterAsync(connectionA, identity, controlled with { Mode = "swarm" });
 Check(registry.Available("stranger").Length == 1, "Swarm allows other Discord users");
-registry.Register(connectionA, identity, controlled with { Control = false });
+await registry.RegisterAsync(connectionA, identity, controlled with { Control = false });
 Check(registry.Available("owner").Length == 0, "Metadata-only registrations are not controllable");
 
 // Correlation binds replies to both the selected session and its authenticated transport.
 var sink = new TestAgentSink();
-var router = new AgentRouter(registry, sink);
-registry.Register(connectionA, identity, controlled);
+var router = new AgentRouter(registry, sink, requestData);
+await registry.RegisterAsync(connectionA, identity, controlled);
 Guid routedId = Guid.Empty;
 bool receiptForwarded = false;
 router.Connect(connectionA, async (message, ct) =>
@@ -156,7 +178,7 @@ Check(sink.Events.IsEmpty, "Wrong transport cannot publish events");
 await router.AcceptAsync(connectionA, "agent.event", JsonSerializer.SerializeToElement(new {
     requestId = routedId, sessionId = Guid.NewGuid(), status = "completed", output = "forged" }));
 Check(sink.Events.IsEmpty, "Wrong session cannot publish events");
-registry.Register(connectionA, identity, controlled with { Name = "Renamed after submission" });
+await registry.RegisterAsync(connectionA, identity, controlled with { Name = "Renamed after submission" });
 await router.AcceptAsync(connectionA, "agent.event", JsonSerializer.SerializeToElement(new {
     requestId = routedId, sessionId = controlled.SessionId, status = "completed", output = "result",
     agent = new { agentName = "forged", ownerId = "attacker" }, prompt = "forged event prompt", promptMessageId = "999" }));
@@ -185,6 +207,7 @@ Check(discord.Sent.Single().Attribution.SessionId == controlled.SessionId &&
 Check(discord.Sent.Single().ReplyTo == "42" && discord.Sent.Single().ChannelId == "456", "Thread reply retains destination and reference");
 Console.WriteLine("Pairing and session ownership checks passed.");
 await DiscordChatClientChecks.RunAsync();
+await WorkspaceChecks.RunAsync();
 
 sealed class TestClock : TimeProvider
 {
