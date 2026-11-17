@@ -41,7 +41,7 @@ websocat ws://localhost:5142/ws
 
 Watch the active connection and sent count appear, type a line to increase the received count, and exit the client to see its final counters in recent disconnections. The backend must be running separately. Vite proxies frontend `/api` requests to the backend at `http://127.0.0.1:5142` by default; see [Frontend/README.md](Frontend/README.md) for setup and deployment details.
 
-The coursework explanation and individual contributions are in [Paperwork/003-diagnostika.md](Paperwork/003-diagnostika.md) and [Paperwork/Dokumentacija.md](Paperwork/Dokumentacija.md). For connector and agent-routing verification, see [Client/README.md](Client/README.md#verification).
+The coursework explanations include [week 3 diagnostics](Paperwork/weekly/003-diagnostika.md) and [week 6 database access](Paperwork/weekly/006-doc.md). Project documentation and individual contributions are in [Paperwork/Dokumentacija.md](Paperwork/Dokumentacija.md). For connector and agent-routing verification, see [Client/README.md](Client/README.md#verification).
 
 ## How it will work
 
