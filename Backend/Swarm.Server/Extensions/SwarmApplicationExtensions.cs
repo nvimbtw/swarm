@@ -14,6 +14,7 @@ public static class SwarmApplicationExtensions
     {
         var database = app.Services.GetRequiredService<CreateDatabase>();
         await database.InitializeAsync();
+        await app.Services.GetRequiredService<ProjectProvisioning>().ApplyAsync(app.Configuration);
 
         var sessions = app.Services.GetRequiredService<SessionRepository>();
         await sessions.DisconnectAllSessionsAsync();

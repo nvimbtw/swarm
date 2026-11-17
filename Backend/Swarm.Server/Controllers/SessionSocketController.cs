@@ -5,12 +5,14 @@ using Microsoft.AspNetCore.Mvc;
 using Swarm.Server.Classi;
 using Swarm.Server.Connections;
 using Swarm.Server.Diagnostics;
+using Swarm.Server.Workspace;
+using Microsoft.Data.Sqlite;
 
 namespace Swarm.Server.Controllers;
 
 [ApiController]
 public sealed class SessionSocketController(PairingService pairing, SessionRegistry registry, AgentRouter agents,
-    DiscordChatService chat,
+    DiscordChatService chat, WorkspaceService workspace,
     ConnectionDiagnostics diagnostics, IHostApplicationLifetime lifetime,
     ILogger<SessionSocketController> logger) : ControllerBase
 {
@@ -90,6 +92,17 @@ public sealed class SessionSocketController(PairingService pairing, SessionRegis
                                 ?? throw new JsonException("Invalid chat request");
                             chatRequests.Add(HandleChat(requestId!, message.GetProperty("type").GetString()!, chatRequest));
                             break;
+                        case string workspaceKind when workspaceKind.StartsWith("workspace.", StringComparison.Ordinal):
+                            chatRequests.RemoveAll(task => task.IsCompletedSuccessfully);
+                            if (chatRequests.Count >= 16)
+                            {
+                                await Send(new { id = requestId, type = "error", error = "workspace_busy" });
+                                break;
+                            }
+                            var workspaceRequest = message.GetProperty("payload").Deserialize<WorkspaceRequest>(JsonOptions)
+                                ?? throw new JsonException("Invalid workspace request");
+                            chatRequests.Add(HandleWorkspace(requestId!, workspaceKind, workspaceRequest));
+                            break;
                         case "agent.reply":
                         case "agent.event":
                             await agents.AcceptAsync(connectionId, message.GetProperty("type").GetString()!,
@@ -148,6 +161,31 @@ public sealed class SessionSocketController(PairingService pairing, SessionRegis
         }
 
         Task Send(object message) => SendCore(message, ct);
+
+        async Task HandleWorkspace(string id, string kind, WorkspaceRequest request)
+        {
+            object response;
+            try
+            {
+                var result = await workspace.ExecuteAsync(connectionId, kind, request, ct);
+                response = new { id, type = "workspace.result", payload = result };
+            }
+            catch (WorkspaceException error) { response = new { id, type = "error", error = error.Message }; }
+            catch (SqliteException error)
+            {
+                logger.LogWarning("Workspace database request failed ({Code}).", error.SqliteErrorCode);
+                response = new { id, type = "error", error = error.SqliteErrorCode == 19
+                    ? "workspace_constraint_violation" : "workspace_database_unavailable" };
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { return; }
+            catch (Exception error)
+            {
+                logger.LogWarning("Workspace request failed ({ErrorType}).", error.GetType().Name);
+                response = new { id, type = "error", error = "workspace_request_failed" };
+            }
+            try { await Send(response); }
+            catch (Exception error) when (error is OperationCanceledException or WebSocketException) { }
+        }
 
         async Task HandleChat(string id, string kind, ChatRequest request)
         {

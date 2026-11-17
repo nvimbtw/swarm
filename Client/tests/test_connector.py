@@ -17,6 +17,7 @@ from swarm_client.cli import rpc
 from swarm_client.storage import backend_origin
 from swarm_client.backend import BackendError, BackendLink
 from swarm_client.service import Connector
+from swarm_client.workspace_tools import WORKSPACE_TOOLS
 from fixtures.codex_daemon import CodexDaemon
 
 
@@ -80,14 +81,14 @@ class IncomingRequestTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ws.messages[0], ws.messages[1])
 
 
-class ChatRequestTests(unittest.IsolatedAsyncioTestCase):
+class SessionToolRequestTests(unittest.IsolatedAsyncioTestCase):
     async def test_ambiguous_native_binding_is_rejected(self):
         sessions = {str(i): {"workspace": "/project", "harness_session_id": "native",
                              "state": "registered", "registration": {"sessionId": str(i)}} for i in range(2)}
         link = SimpleNamespace(sessions=sessions, request=AsyncMock())
         connector = Connector(None, None)
         with self.assertRaisesRegex(BackendError, "ambiguous"):
-            await connector.chat(link, {"kind": "discord.read", "channelId": "123",
+            await connector.session_tool(link, {"kind": "discord.read", "channelId": "123",
                 "harness_session_id": "native", "workspace": "/project"})
         link.request.assert_not_awaited()
 
@@ -96,10 +97,28 @@ class ChatRequestTests(unittest.IsolatedAsyncioTestCase):
             request=AsyncMock(side_effect=BackendError("connection_lost")))
         connector = Connector(None, None)
         with self.assertRaisesRegex(BackendError, "chat_delivery_unknown_check_discord"):
-            await connector.chat(link, {"session_id": "one", "kind": "discord.send",
+            await connector.session_tool(link, {"session_id": "one", "kind": "discord.send",
                 "channelId": "123", "content": "result", "sessionId": "forged"})
         link.request.assert_awaited_once_with("discord.send", {
             "channelId": "123", "content": "result", "sessionId": "one"})
+
+    async def test_workspace_fields_cannot_override_session_project_or_author(self):
+        link = SimpleNamespace(sessions={"one": {"state": "registered", "registration": {"sessionId": "one"}}},
+            request=AsyncMock(return_value={"payload": {"item": {"id": 1}}}))
+        connector = Connector(None, None)
+        result = await connector.session_tool(link, {"operation": "workspace", "session_id": "one",
+            "kind": "workspace.initiative.create", "title": "Epic", "sessionId": "forged",
+            "projectId": "other", "authorMemberId": 999})
+        self.assertEqual(result["item"]["id"], 1)
+        link.request.assert_awaited_once_with("workspace.initiative.create", {"sessionId": "one", "title": "Epic"})
+
+    async def test_uncertain_workspace_write_is_not_retried(self):
+        link = SimpleNamespace(sessions={"one": {"state": "registered", "registration": {"sessionId": "one"}}},
+            request=AsyncMock(side_effect=BackendError("connection_lost")))
+        connector = Connector(None, None)
+        with self.assertRaisesRegex(BackendError, "workspace_delivery_unknown_read_before_retry"):
+            await connector.session_tool(link, {"session_id": "one", "kind": "workspace.document.create", "title": "Design"})
+        self.assertEqual(link.request.await_count, 1)
 
     async def test_auto_binding_rejects_the_same_thread_in_multiple_backends(self):
         connector = Connector(None, None)
@@ -319,6 +338,69 @@ class ConnectorIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(metadata["session"]["registration"]["sessionId"],
                          controlled["session"]["registration"]["sessionId"])
 
+    async def test_workspace_mcp_crud_uses_the_attached_project_without_discord(self):
+        from mcp import ClientSession, StdioServerParameters
+        from mcp.client.stdio import stdio_client
+
+        await self.pair()
+        thread_id = str(uuid.uuid4())
+        connected = await self.call("connect", name="workspace-agent", project="swarm", harness="codex",
+            mode="solo", workspace=self.temp.name, harness_session_id=thread_id, control=True)
+        self.assertTrue(connected["mcp"]["ready"], connected)
+        connection_before = (await self.call("sessions"))["payload"][0]["connectionId"]
+        params = StdioServerParameters(command=sys.executable, args=["-m", "swarm_client.cli",
+            "--home", str(self.home), "mcp", "--backend", self.origin,
+            "--workspace", self.temp.name, "--harness-session-id", thread_id])
+        async with stdio_client(params) as (reader, writer):
+            async with ClientSession(reader, writer) as mcp:
+                await mcp.initialize()
+
+                async def tool(name, **arguments):
+                    result = await mcp.call_tool(name, arguments)
+                    self.assertFalse(result.isError, result)
+                    return json.loads(result.content[0].text)
+
+                epic = (await tool("initiative_create", title="Agent workspace", brief_markdown="Big goal"))["item"]
+                feature = (await tool("work_item_create", title="Search features", type="feature",
+                                      initiative_id=epic["id"]))["item"]
+                issue = (await tool("work_item_create", title="Fix filters", type="issue",
+                                    initiative_id=epic["id"]))["item"]
+                children = await tool("work_item_list", initiative_id=epic["id"], status="open", type="feature")
+                self.assertEqual([item["id"] for item in children["items"]], [feature["id"]])
+                self.assertEqual(children["items"][0]["initiativeTitle"], epic["title"])
+                self.assertEqual((await tool("initiative_list", query="workspace"))["total"], 1)
+                epic = (await tool("initiative_update", id=epic["id"], expected_version=1,
+                                   brief_markdown="Updated scope"))["item"]
+                self.assertEqual((await tool("initiative_get", id=epic["id"]))["item"]["version"], 2)
+                document = (await tool("document_create", title="API design", markdown="# Initial"))["item"]
+                document = (await tool("document_update", id=document["id"], expected_version=1,
+                                       markdown="# Revised 🌍"))["item"]
+                self.assertEqual((await tool("document_get", id=document["id"]))["item"]["markdown"], "# Revised 🌍")
+                self.assertEqual((await tool("document_list", query="API"))["total"], 1)
+                stale = await mcp.call_tool("document_update", {"id": document["id"], "expected_version": 1,
+                                                              "markdown": "Overwrite"})
+                self.assertTrue(stale.isError)
+                self.assertIn("version_conflict_read_again", stale.content[0].text)
+                invalid = await mcp.call_tool("work_item_create", {"title": "Bad", "type": "epic"})
+                self.assertTrue(invalid.isError)
+                blocked = await mcp.call_tool("initiative_delete", {"id": epic["id"], "expected_version": 2})
+                self.assertTrue(blocked.isError)
+                self.assertIn("initiative_has_work_items", blocked.content[0].text)
+                feature = (await tool("work_item_update", id=feature["id"], expected_version=1,
+                                      status="verification"))["item"]
+                self.assertEqual((await tool("work_item_get", id=feature["id"]))["item"]["status"], "verification")
+                for item in (feature, issue):
+                    await tool("work_item_delete", id=item["id"], expected_version=item["version"])
+                await tool("initiative_delete", id=epic["id"], expected_version=epic["version"])
+                await tool("document_delete", id=document["id"], expected_version=document["version"])
+                self.assertEqual((await tool("initiative_list"))["total"], 0)
+                self.assertEqual((await tool("work_item_list"))["total"], 0)
+                self.assertEqual((await tool("document_list"))["total"], 0)
+        connection_after = (await self.call("sessions"))["payload"][0]["connectionId"]
+        self.assertEqual(connection_before, connection_after)
+        async with self.http.get(self.origin + "/test/chat-sent") as response:
+            self.assertEqual(await response.json(), [])
+
     async def test_stdio_mcp_reads_and_replies_over_the_registered_socket(self):
         from mcp import ClientSession, StdioServerParameters
         from mcp.client.stdio import stdio_client
@@ -337,7 +419,7 @@ class ConnectorIntegrationTests(unittest.IsolatedAsyncioTestCase):
             async with ClientSession(reader, writer) as mcp:
                 await mcp.initialize()
                 names = {tool.name for tool in (await mcp.list_tools()).tools}
-                self.assertEqual(names, {"swarm_status", "discord_get_channel", "discord_read_messages", "discord_send_message"})
+                self.assertEqual(names, {"swarm_status", "discord_get_channel", "discord_read_messages", "discord_send_message"} | WORKSPACE_TOOLS)
 
                 async def tool(name, **arguments):
                     result = await mcp.call_tool(name, arguments)

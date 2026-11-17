@@ -2,7 +2,7 @@
 
 One local service connects multiple harness sessions to the backend through one authenticated WebSocket per backend origin. Discord `/agent` routes prompts through that connection to existing Codex daemon sessions and returns their results to the originating channel.
 
-The connector runs on Linux/macOS. Session-bound MCP tools read Discord history and post updates through the same backend WebSocket. Other harness control adapters, Windows support, and automatic conversation-close detection are not implemented.
+The connector runs on Linux/macOS. Session-bound MCP tools manage project work and documents, read Discord history, and post updates through the same backend WebSocket. Other harness control adapters, Windows support, and automatic conversation-close detection are not implemented.
 
 ## Install and pair
 
@@ -91,7 +91,7 @@ Native Codex setup is automatic in `swarm connect`. After pairing, the connector
 
 A successful result includes `mcp.ready: true`. No extra pairing code, user config edit, or harness restart is needed. This requires the native daemon's config, live MCP reload, status, and tool-call APIs. If any stage fails, `connect` reports an explicit MCP error and exits nonzero; prompt delivery can remain registered, but MCP is not reported ready. An unrelated server already named `swarm` is preserved and reported as `mcp_config_conflict`.
 
-The automatic server uses `swarm mcp --auto`: Codex supplies `_meta.threadId` on each tool call. The local connector selects exactly one matching native attachment across its backends. Missing identity, multiple matching registrations, and disconnected attachments fail explicitly; the server never guesses from the workspace or last connected agent. This keeps multiple conversations in one workspace separate. Disconnecting a registration immediately removes its chat access; the shared MCP configuration can stay installed for later connections.
+The automatic server uses `swarm mcp --auto`: Codex supplies `_meta.threadId` on each tool call. The local connector selects exactly one matching native attachment across its backends. Missing identity, multiple matching registrations, and disconnected attachments fail explicitly; the server never guesses from the workspace or last connected agent. This keeps multiple conversations in one workspace separate. Disconnecting a registration immediately removes its chat and workspace tool access; the shared MCP configuration can stay installed for later connections.
 
 For metadata-only attachments or another harness, **manual stdio setup** is still available with an explicit binding. Replace the paths, backend, and Swarm session ID returned by `connect`:
 
@@ -110,7 +110,7 @@ For metadata-only attachments or another harness, **manual stdio setup** is stil
 }
 ```
 
-For manual setup, the surrounding config format depends on the harness; `command` and `args` above are the stdio process settings. `swarm serve` must already be running. A custom home goes before the subcommand: `swarm --home /path mcp …`. This process neither starts another harness nor opens another backend connection. Each tool call follows **harness → stdio MCP → private connector socket → existing authenticated backend WebSocket → Discord**, with replies correlated over the same path.
+For manual setup, the surrounding config format depends on the harness; `command` and `args` above are the stdio process settings. `swarm serve` must already be running. A custom home goes before the subcommand: `swarm --home /path mcp …`. This process neither starts another harness nor opens another backend connection. Each tool call follows **harness → stdio MCP → private connector socket → existing authenticated backend WebSocket → backend service**, with replies correlated over the same path. Chat operations use Discord; workspace operations use SQLite.
 
 Instead of `--session`, use `--harness-session-id <native-thread-id>` plus `--workspace`, or let MCP inherit `CODEX_THREAD_ID` from native Codex. This resolves exactly one local attachment for that backend; missing or ambiguous attachments fail. Explicit session bindings must be refreshed after a connector restart and reattachment. Backend and workspace can use the preferences saved by `connect`. Metadata-only attachments can use MCP too; receiving Discord prompts still requires a supported control adapter.
 
@@ -146,13 +146,33 @@ swarm disconnect --backend http://localhost:5142 --session <swarm-session-id>
 | Empty Discord session picker | Check `registration.control` and `delivery.ready`. Metadata-only sessions are hidden. Solo also requires the paired Discord account. |
 | `mcp_live_reload_unavailable` / `mcp_config_unavailable` | Native daemon lacks the required live setup API; MCP readiness remains false. Diagnose/update that adapter instead of claiming it is connected. |
 | `mcp_config_conflict` | Another `swarm` MCP entry exists; the connector preserves it. Inspect that entry before deciding how to resolve the conflict. |
-| `pairing_required` | Pair again. Backend credentials are held in memory and are lost on backend restart. |
+| `pairing_required` | Pair again if the credential was revoked, replaced, or the backend database was reset. Credentials persist across ordinary backend restarts. |
 | `codex_session_not_loaded_on_daemon` | Connect the actual live conversation on the correct daemon; do not resume its history in another process. |
 | `codex_unavailable_check_daemon_socket` | Check the daemon and its socket path. The control socket requires a WebSocket handshake. |
 | Updated code seems unchanged | Check the running version. Restart the connector and reattach its sessions when no active work will be disturbed; editing files does not reload Python. |
 | `unknown` delivery or connection lost | Check local Codex before resending. Accepted work may still be running. |
 
-Reconnect restores live registrations after transport loss, with backoff up to approximately 31 seconds. Prompts and results are never replayed automatically. A disconnect cancels requests still waiting locally; work already accepted by Codex can continue. Connector restarts discard local attachments and waiting requests but retain credentials. Backend request tracking lasts up to 24 hours and is lost on restart.
+Reconnect restores live registrations after transport loss, with backoff up to approximately 31 seconds. Prompts and results are never replayed automatically. A disconnect cancels requests still waiting locally; work already accepted by Codex can continue. Connector restarts discard local attachments and waiting requests but retain credentials. Live request correlation lasts up to 24 hours and is lost on restart; persisted request/event history remains in SQLite and is not replayed.
+
+## Manage initiatives, issues/features and documents
+
+The same MCP connection exposes fifteen additional tools:
+
+| Resource | Tools |
+| --- | --- |
+| Initiatives (epics) | `initiative_create`, `initiative_get`, `initiative_update`, `initiative_delete`, `initiative_list` |
+| Issues and features | `work_item_create`, `work_item_get`, `work_item_update`, `work_item_delete`, `work_item_list` |
+| Documents | `document_create`, `document_get`, `document_update`, `document_delete`, `document_list` |
+
+For example, create an initiative, then call `work_item_create(title="Implement search", type="feature", initiative_id=<returned ID>)`. List its open children with `work_item_list(initiative_id=<ID>, status="open")`, or only open features with `type="feature"`. Issues/features are peer child items, not parents of one another. Standalone work items are supported too.
+
+All list tools accept `query` for literal title search, `limit` (1–20) and `after_id` (pass the returned `nextAfterId`). Results contain `items`, `total` and `nextAfterId`. They omit bodies; use the get tools for full briefs or document Markdown. Reads return `item`, including `version`. Updates/deletes require that number as `expected_version`. On a version conflict, reread before reconciling. Document updates append revisions; deletes preserve history. An initiative cannot be deleted while it has active children. Use `work_item_update` to move or unlink them (`clear_initiative=true`) first.
+
+These tools always use the attached session's project and paired owner. They cannot accept a project/session/author override. The backend operator must [provision the project key and active server members](../Backend/docs/workspace.md#provision-a-project-before-using-its-tools); a matching local label alone grants no access. This database membership check is separate from the existing live Discord channel permission checks.
+
+Workspace writes do not post to Discord. `workspace_delivery_unknown_read_before_retry` means a write may have committed before its response was lost: inspect the current list/item before considering another write. No mutation is retried automatically. Completed work goes to verification; close it only after the user agrees.
+
+After updating the connector to 0.5.0, restart the shared service when it will not disrupt active work, reattach sessions, and let native connect reload/verify the expanded MCP inventory. No new pairing is required for an ordinary backend restart using the same database.
 
 ## Local state
 
