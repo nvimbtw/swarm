@@ -16,9 +16,13 @@ public sealed class WorkRequestRepository(DatabaseService database)
 
         await DatabaseQueries.ExecuteAsync(connection, transaction, @"
             INSERT INTO WorkRequest (ID, TargetSessionID, RequesterUserID, Kind, DeliveryMode, Prompt,
-                Status, Model, Reasoning)
-            VALUES ($id, $session, $user, 'agent.submit', $delivery, $prompt, 'sending', $model, $reasoning);",
-            ct, ("$id", requestId.ToString()), ("$session", request.SessionId.ToString()),
+                Status, Model, Reasoning, CreatedAt, RequesterMemberID)
+            VALUES ($id, $session, $user, 'agent.submit', $delivery, $prompt, 'sending', $model, $reasoning, $now,
+                (SELECT m.ID FROM Member m JOIN Project p ON p.ServerID=m.ServerID
+                 JOIN Session s ON s.WorkspaceProjectID=p.ID
+                 WHERE s.ID=$session AND m.UserID=$user AND m.LeftAt IS NULL));",
+            ct, ("$now", DateTimeOffset.UtcNow.ToString("O")),
+            ("$id", requestId.ToString()), ("$session", request.SessionId.ToString()),
             ("$user", userId), ("$delivery", request.Delivery), ("$prompt", request.Prompt),
             ("$model", (object?)request.Model ?? DBNull.Value),
             ("$reasoning", (object?)request.Reasoning ?? DBNull.Value));

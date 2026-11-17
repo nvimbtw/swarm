@@ -1,5 +1,4 @@
 
-using System.Runtime.CompilerServices;
 using Microsoft.Data.Sqlite;
 
 namespace Swarm.Server.Db;
@@ -47,7 +46,7 @@ internal static class DatabaseQueries
     }
 
     public static async Task<long> ScalarLongAsync(SqliteConnection connection, SqliteTransaction transaction,
-        string sql, CancellationToken ct, params object[] parameters)
+        string sql, CancellationToken ct, params (string Name, object? Value)[] parameters)
     {
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
@@ -59,7 +58,7 @@ internal static class DatabaseQueries
     }
 
     public static async Task ExecuteAsync(SqliteConnection connection, SqliteTransaction? transaction,
-        string sql, CancellationToken ct, params object[] parameters)
+        string sql, CancellationToken ct, params (string Name, object? Value)[] parameters)
     {
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
@@ -70,15 +69,9 @@ internal static class DatabaseQueries
         await command.ExecuteNonQueryAsync(ct);
     }
 
-    private static void AddParameters(SqliteCommand command, object[] parameters)
+    private static void AddParameters(SqliteCommand command, (string Name, object? Value)[] parameters)
     {
-        foreach (object item in parameters)
-        {
-            ITuple parameter = (ITuple)item;
-            command.Parameters.AddWithValue(
-                (string)parameter[0]!,
-                parameter[1] ?? DBNull.Value
-            );
-        }
+        foreach (var parameter in parameters)
+            command.Parameters.AddWithValue(parameter.Name, parameter.Value ?? DBNull.Value);
     }
 }

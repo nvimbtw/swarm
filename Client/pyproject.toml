@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "swarm-connector"
-version = "0.4.1"
+version = "0.5.0"
 description = "Local multi-session connector for Swarm"
 requires-python = ">=3.11"
 dependencies = ["aiohttp>=3.12,<4", "mcp>=1.20,<2"]

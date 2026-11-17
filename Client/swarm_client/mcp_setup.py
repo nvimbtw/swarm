@@ -5,9 +5,10 @@ from pathlib import Path
 import sys
 
 from .codex_rpc import CodexError
+from .workspace_tools import WORKSPACE_TOOLS
 
 SERVER_NAME = "swarm"
-TOOLS = {"swarm_status", "discord_get_channel", "discord_read_messages", "discord_send_message"}
+TOOLS = {"swarm_status", "discord_get_channel", "discord_read_messages", "discord_send_message"} | WORKSPACE_TOOLS
 
 
 async def ensure_mcp(rpc, home, session):

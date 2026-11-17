@@ -6,6 +6,7 @@ using NetCord.Hosting.Services.ApplicationCommands;
 using Swarm.Server.Classi;
 using Swarm.Server.Connections;
 using Swarm.Server.Db;
+using Swarm.Server.Workspace;
 using Swarm.Server.Db.Repositories;
 using Swarm.Server.Diagnostics;
 using DiscordBot.Commands;
@@ -27,6 +28,9 @@ public static class SwarmServiceExtensions
         services.AddSingleton<CredentialRepository>();
         services.AddSingleton<SessionRepository>();
         services.AddSingleton<WorkRequestRepository>();
+        services.AddSingleton<ProjectProvisioning>();
+        services.AddSingleton<IWorkspaceRepository, WorkspaceRepository>();
+        services.AddSingleton<WorkspaceService>();
 
         // Povezave in agenti.
         services.AddSingleton<ConnectionDiagnostics>();
