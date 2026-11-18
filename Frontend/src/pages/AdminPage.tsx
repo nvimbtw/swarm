@@ -1,4 +1,5 @@
 import { useReducer } from 'react'
+import { Link } from 'react-router-dom'
 import {
   initiatives,
   nowRequest,
@@ -21,7 +22,9 @@ import { PageHeader } from '../components/ui/PageHeader'
 import { QueuePanel } from '../components/admin/QueuePanel'
 import { SessionList } from '../components/admin/SessionList'
 import { Workbench } from '../components/admin/Workbench'
+import { connectionStatus } from '../lib/connection-status'
 import { usePageMeta } from '../lib/document-meta'
+import { useDiagnostics } from '../lib/use-diagnostics'
 
 export function AdminPage() {
   // The preview opens with the waiting request selected so the queue-to-workbench
@@ -37,7 +40,7 @@ export function AdminPage() {
     path: '/admin',
   })
 
-  const connected = sessions.filter((session) => session.connected).length
+  const live = connectionStatus(useDiagnostics())
   const counts = workCounts(workItems)
   const waiting = waitingCount(requests)
   const groups = groupWorkItems(initiatives, workItems, state.collapsedGroupIds)
@@ -48,12 +51,15 @@ export function AdminPage() {
       <PageHeader
         title="Admin"
         stats={[
-          { value: connected, label: 'connected' },
+          { value: live.count ?? '—', label: live.noun },
           { value: waiting, label: 'waiting' },
           { value: counts.active, label: 'active' },
         ]}
         actions={
           <>
+            <Link to="/display" className={buttonClass('quiet')}>
+              Display mode
+            </Link>
             <a
               href="https://discord.com"
               target="_blank"
@@ -77,7 +83,8 @@ export function AdminPage() {
       />
 
       <p className="mb-6 text-xs text-ink-muted">
-        This workspace uses demo data. Live server connections are shown in Overview.
+        Sessions, queue, and work use demo data. The connection count is live from the server;
+        Overview lists each connection.
       </p>
 
       <div className="grid gap-10 xl:grid-cols-[360px_minmax(0,1fr)] xl:gap-12">

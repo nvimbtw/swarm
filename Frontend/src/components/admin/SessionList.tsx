@@ -1,24 +1,7 @@
-import type { CompanionPose, Session } from '../../data/fixtures'
+import type { Session } from '../../data/fixtures'
 import { cn } from '../../lib/cn'
 import { Companion } from '../ui/Companion'
-
-const POSE_LABEL: Record<CompanionPose, string> = {
-  generating: 'generating',
-  'request-sent': 'request sent',
-  'request-received': 'request received',
-  away: 'away',
-  completed: 'completed',
-  offline: 'offline',
-}
-
-const POSE_TONE: Record<CompanionPose, string> = {
-  generating: 'text-progress',
-  'request-sent': 'text-queued',
-  'request-received': 'text-queued',
-  away: 'text-ink-muted',
-  completed: 'text-closed',
-  offline: 'text-ink-muted',
-}
+import { POSE_LABEL, POSE_TONE } from '../ui/pose'
 
 export function SessionList({ sessions }: { sessions: Session[] }) {
   const connected = sessions.filter((session) => session.connected).length
