@@ -12,7 +12,7 @@ from . import __version__
 from .backend import BackendError, BackendLink
 from .codex import CodexAdapter
 from .codex_rpc import CodexError, CodexRpc
-from .mcp_setup import ensure_mcp
+from .mcp_setup import ensure_mcp, registration_command
 from .protocol import MAX_MESSAGE_BYTES, MAX_SESSIONS
 from .storage import Storage, backend_origin
 from .workspace_tools import WORKSPACE_OPERATIONS, WORKSPACE_FIELDS
@@ -120,6 +120,8 @@ class Connector:
         except (CodexError, TimeoutError, OSError, ValueError, KeyError, TypeError) as error:
             code = str(error) if isinstance(error, CodexError) else "mcp_setup_failed"
             session["mcp"] = {"ready": False, "state": "failed", "error": code}
+            if code != "mcp_config_conflict":
+                session["mcp"]["registration_command"] = registration_command(self.storage.home)
 
     async def session_tool(self, link, request):
         # MCP is bound to one attachment, never an arbitrary session supplied by a tool call.

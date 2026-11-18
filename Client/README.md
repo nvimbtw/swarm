@@ -144,7 +144,7 @@ swarm disconnect --backend http://localhost:5142 --session <swarm-session-id>
 | Symptom | Check or action |
 | --- | --- |
 | Empty Discord session picker | Check `registration.control` and `delivery.ready`. Metadata-only sessions are hidden. Solo also requires the paired Discord account. |
-| `mcp_live_reload_unavailable` / `mcp_config_unavailable` | Native daemon lacks the required live setup API; MCP readiness remains false. Diagnose/update that adapter instead of claiming it is connected. |
+| `mcp_live_reload_unavailable` / `mcp_config_unavailable` | Run the full `mcp.registration_command` printed by `connect` in the same Codex profile. If config could not be read, check any existing entry with `codex mcp get swarm` first. Keep the connector running, restart Codex, resume the same thread, and retry `connect` to verify readiness. |
 | `mcp_config_conflict` | Another `swarm` MCP entry exists; the connector preserves it. Inspect that entry before deciding how to resolve the conflict. |
 | `pairing_required` | Pair again if the credential was revoked, replaced, or the backend database was reset. Credentials persist across ordinary backend restarts. |
 | `codex_session_not_loaded_on_daemon` | Connect the actual live conversation on the correct daemon; do not resume its history in another process. |
