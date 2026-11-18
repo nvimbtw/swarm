@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from pathlib import Path
 import stat
 import subprocess
+import shlex
 import sys
 import tempfile
 import unittest
@@ -26,6 +27,21 @@ FIXTURE = ROOT / "Backend/Swarm.Server.Tests/bin/Debug/net10.0/Swarm.Server.Test
 
 
 class ConfigurationTests(unittest.TestCase):
+    def test_python_alias_must_belong_to_same_environment(self):
+        from swarm_client.mcp_setup import same_interpreter
+
+        with tempfile.TemporaryDirectory() as directory:
+            env = Path(directory)
+            interpreter = env / "python3"
+            interpreter.symlink_to(sys.executable)
+            alias = env / "python"
+            alias.symlink_to(interpreter)
+            other = env / "another-env" / "python"
+            other.parent.mkdir()
+            other.symlink_to(interpreter)
+            self.assertTrue(same_interpreter(str(alias), str(interpreter)))
+            self.assertFalse(same_interpreter(str(other), str(interpreter)))
+
     def test_credentials_require_trusted_origin(self):
         self.assertEqual(backend_origin("http://localhost:5142/"), "http://localhost:5142")
         self.assertEqual(backend_origin("https://swarm.example"), "https://swarm.example")
@@ -530,6 +546,7 @@ class ConnectorIntegrationTests(unittest.IsolatedAsyncioTestCase):
             workspace=self.temp.name, harness_session_id=str(uuid.uuid4()), control=True)
         self.assertEqual(conflict["status"], "registered")
         self.assertEqual(conflict["mcp"]["error"], "mcp_config_conflict")
+        self.assertNotIn("registration_command", conflict["mcp"])
         self.assertEqual(self.daemon.mcp_config["swarm"], {"command": "someone-elses-server"})
         del self.daemon.mcp_config["swarm"]
         (Path(self.temp.name) / "no-mcp-reload").touch()
@@ -545,7 +562,11 @@ class ConnectorIntegrationTests(unittest.IsolatedAsyncioTestCase):
         output, error = await process.communicate()
         self.assertFalse(error, error.decode())
         self.assertEqual(process.returncode, 1)
-        self.assertEqual(json.loads(output)["mcp"]["error"], "mcp_live_reload_unavailable")
+        mcp = json.loads(output)["mcp"]
+        self.assertEqual(mcp["error"], "mcp_live_reload_unavailable")
+        self.assertEqual(shlex.split(mcp["registration_command"]), [
+            "codex", "mcp", "add", "swarm", "--", sys.executable, "-m", "swarm_client.cli",
+            "--home", str(self.home.resolve()), "mcp", "--auto"])
 
     async def test_cli_consumed_discord_request_completes_with_original_prompt_context(self):
         await self.pair()
