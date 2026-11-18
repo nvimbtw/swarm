@@ -33,3 +33,6 @@ __pycache__/
 node_modules/
 dist/
 .next/
+
+# CodeGraph index
+.codegraph/
